@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>かんたん翻訳</title>
+<style>
+  :root{--bg:#f4f6fb;--card:#fff;--text:#1f2937;--sub:#6b7280;--line:#d7dce5;--accent:#2563eb;--accent2:#1d4ed8}
+  @media (prefers-color-scheme:dark){:root{--bg:#111827;--card:#1f2937;--text:#f3f4f6;--sub:#9ca3af;--line:#374151;--accent:#3b82f6;--accent2:#2563eb}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","Hiragino Sans","Yu Gothic UI",Meiryo,sans-serif}
+  header{padding:14px 20px;font-size:20px;font-weight:700}
+  main{max-width:1200px;margin:0 auto;padding:0 16px 32px}
+  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:760px){.grid{grid-template-columns:1fr}}
+  .pane{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;min-width:0}
+  .head{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .head select{flex:1;min-width:120px}
+  select,button{font:inherit;color:var(--text);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;padding:8px 18px}
+  button.primary:hover{background:var(--accent2)}
+  textarea{width:100%;height:260px;min-height:100px;resize:both;max-width:100%;font-size:18px;line-height:1.55;padding:10px;color:var(--text);background:transparent;border:1px solid var(--line);border-radius:8px;font-family:inherit}
+  textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  .tools{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .tools .sp{flex:1}
+  .cnt{color:var(--sub);font-size:13px}
+  .lbl{font-size:12px;color:var(--sub)}
+  #status{color:var(--sub);font-size:13px;min-height:1.2em}
+  #status.err{color:#dc2626}
+  label.chk{display:flex;gap:6px;align-items:center;font-size:14px;cursor:pointer}
+</style>
+</head>
+<body>
+<header>🌐 かんたん翻訳</header>
+<main>
+  <div class="bar">
+    <button class="primary" id="go">翻訳する (Ctrl+Enter)</button>
+    <button id="swap" title="言語と内容を入れ替え">⇄ 入れ替え</button>
+    <label class="chk"><input type="checkbox" id="auto"> 入力しながら自動翻訳</label>
+    <span id="status"></span>
+  </div>
+
+  <div class="grid">
+    <!-- 左 -->
+    <section class="pane" id="paneL">
+      <div class="head"><select id="langL"></select></div>
+      <textarea id="boxL" placeholder="ここに入力・貼り付け" spellcheck="false"></textarea>
+      <div class="tools">
+        <button data-act="paste" data-s="L">📋 貼り付け</button>
+        <button data-act="copy" data-s="L">コピー</button>
+        <button data-act="clear" data-s="L">消去</button>
+        <span class="sp"></span>
+        <span class="lbl">文字</span>
+        <button data-act="fs-" data-s="L">A−</button><button data-act="fs+" data-s="L">A＋</button>
+        <span class="lbl">高さ</span>
+        <button data-act="h-" data-s="L">−</button><button data-act="h+" data-s="L">＋</button>
+        <span class="cnt" id="cntL">0文字</span>
+      </div>
+    </section>
+    <!-- 右 -->
+    <section class="pane" id="paneR">
+      <div class="head"><select id="langR"></select></div>
+      <textarea id="boxR" placeholder="翻訳結果（ここも編集・貼り付けできます）" spellcheck="false"></textarea>
+      <div class="tools">
+        <button data-act="paste" data-s="R">📋 貼り付け</button>
+        <button data-act="copy" data-s="R">コピー</button>
+        <button data-act="clear" data-s="R">消去</button>
+        <button data-act="rev" data-s="R" title="右の文章を左の言語へ翻訳">← 左へ翻訳</button>
+        <span class="sp"></span>
+        <span class="lbl">文字</span>
+        <button data-act="fs-" data-s="R">A−</button><button data-act="fs+" data-s="R">A＋</button>
+        <span class="lbl">高さ</span>
+        <button data-act="h-" data-s="R">−</button><button data-act="h+" data-s="R">＋</button>
+        <span class="cnt" id="cntR">0文字</span>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+const LANGS = [["ja","日本語"],["en","英語"],["zh-CN","中国語(簡体)"],["zh-TW","中国語(繁体)"],["ko","韓国語"],["es","スペイン語"],["fr","フランス語"],["de","ドイツ語"],["it","イタリア語"],["pt","ポルトガル語"],["ru","ロシア語"],["vi","ベトナム語"],["th","タイ語"],["id","インドネシア語"],["tl","フィリピノ語"],["hi","ヒンディー語"],["ar","アラビア語"],["tr","トルコ語"],["nl","オランダ語"],["pl","ポーランド語"],["uk","ウクライナ語"],["sv","スウェーデン語"]];
+const $ = id => document.getElementById(id);
+const box = {L:$("boxL"), R:$("boxR")}, lang = {L:$("langL"), R:$("langR")}, cnt = {L:$("cntL"), R:$("cntR")};
+const status = $("status");
+
+// 言語セレクト（左だけ自動検出あり）
+function fill(sel, withAuto){
+  sel.innerHTML = (withAuto ? '<option value="auto">言語を自動検出</option>' : "") +
+    LANGS.map(([c,n]) => `<option value="${c}">${n}</option>`).join("");
+}
+fill(lang.L, true); fill(lang.R, false);
+
+// 設定の保存・復元
+const S = {fsL:18, fsR:18, hL:260, hR:260, sl:"auto", tl:"ja", auto:false};
+try{ Object.assign(S, JSON.parse(localStorage.getItem("trans-settings")||"{}")); }catch(e){}
+const save = () => { try{ localStorage.setItem("trans-settings", JSON.stringify(S)); }catch(e){} };
+function apply(){
+  for(const s of ["L","R"]){ box[s].style.fontSize = S["fs"+s]+"px"; box[s].style.height = S["h"+s]+"px"; }
+  lang.L.value = S.sl; lang.R.value = S.tl; $("auto").checked = S.auto;
+}
+apply();
+
+// ドラッグで大きさを変えたときも記憶
+new ResizeObserver(() => {
+  for(const s of ["L","R"]){ const h = Math.round(box[s].getBoundingClientRect().height); if(h>50) S["h"+s]=h; }
+}).observe(box.L);
+new ResizeObserver(() => {}).observe(box.R);
+["L","R"].forEach(s => box[s].addEventListener("mouseup", () => { S["h"+s]=Math.round(box[s].getBoundingClientRect().height); save(); }));
+
+function setStatus(t, err){ status.textContent = t||""; status.className = err ? "err" : ""; }
+function count(s){ cnt[s].textContent = box[s].value.length.toLocaleString()+"文字"; }
+["L","R"].forEach(s => box[s].addEventListener("input", () => { count(s); if(s==="L") schedule(); }));
+
+// ---- 翻訳本体 ----
+function chunk(text, max){
+  const out=[]; let cur="";
+  for(const part of text.split(/(?<=[\n。．.!?！？])/)){
+    if((cur+part).length>max && cur){ out.push(cur); cur=""; }
+    if(part.length>max){ for(let i=0;i<part.length;i+=max) out.push(part.slice(i,i+max)); }
+    else cur+=part;
+  }
+  if(cur) out.push(cur);
+  return out;
+}
+async function viaGoogle(q, sl, tl){
+  const r = await fetch("https://translate.googleapis.com/translate_a/single", {
+    method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body:"client=gtx&dt=t&sl="+encodeURIComponent(sl)+"&tl="+encodeURIComponent(tl)+"&q="+encodeURIComponent(q)
+  });
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  const j = await r.json();
+  return {text:j[0].map(x=>x[0]).join(""), detected:j[2]};
+}
+async function viaMyMemory(q, sl, tl){
+  const src = sl==="auto" ? "Autodetect" : sl;
+  const r = await fetch("https://api.mymemory.translated.net/get?q="+encodeURIComponent(q)+"&langpair="+encodeURIComponent(src+"|"+tl));
+  const j = await r.json();
+  if(j.responseStatus!==200) throw new Error(j.responseDetails||"翻訳失敗");
+  return {text:j.responseData.translatedText, detected:null};
+}
+async function translate(text, sl, tl){
+  const parts = chunk(text, 1500), res=[]; let detected=null;
+  for(const p of parts){
+    if(!p.trim()){ res.push(p); continue; }
+    let o;
+    try{ o = await viaGoogle(p, sl, tl); }
+    catch(e){ o = await viaMyMemory(p.slice(0,450), sl, tl); }
+    res.push(o.text); detected = detected || o.detected;
+  }
+  return {text:res.join(""), detected};
+}
+
+let seq = 0, timer;
+async function run(from){           // from: "L"→右へ / "R"→左へ
+  const to = from==="L" ? "R" : "L";
+  const text = box[from].value;
+  if(!text.trim()){ box[to].value=""; count(to); setStatus(""); return; }
+  const sl = from==="L" ? lang.L.value : lang.R.value;
+  const tl = to==="R" ? lang.R.value : (lang.L.value==="auto" ? "en" : lang.L.value);
+  const my = ++seq; setStatus("翻訳中…");
+  try{
+    const r = await translate(text, sl, tl);
+    if(my!==seq) return;
+    box[to].value = r.text; count(to);
+    const n = r.detected && sl==="auto" ? (LANGS.find(l=>l[0]===r.detected)||[,r.detected])[1] : "";
+    setStatus(n ? "検出した言語: "+n : "完了");
+  }catch(e){ if(my===seq) setStatus("翻訳できませんでした（ネット接続を確認してください）", true); }
+}
+function schedule(){ if(!S.auto) return; clearTimeout(timer); timer=setTimeout(()=>run("L"), 700); }
+
+$("go").onclick = () => run("L");
+$("auto").onchange = e => { S.auto=e.target.checked; save(); };
+lang.L.onchange = () => { S.sl=lang.L.value; save(); if(box.L.value.trim()) run("L"); };
+lang.R.onchange = () => { S.tl=lang.R.value; save(); if(box.L.value.trim()) run("L"); };
+document.addEventListener("keydown", e => { if((e.ctrlKey||e.metaKey) && e.key==="Enter") run(document.activeElement===box.R ? "R" : "L"); });
+
+$("swap").onclick = () => {
+  const sl = lang.L.value==="auto" ? "en" : lang.L.value, tl = lang.R.value;
+  lang.L.value = tl; lang.R.value = sl; S.sl=tl; S.tl=sl; save();
+  const t = box.L.value; box.L.value = box.R.value; box.R.value = t; count("L"); count("R");
+};
+
+// ---- コピー・貼り付け・サイズ変更（左右共通）----
+async function copyText(t){
+  try{ await navigator.clipboard.writeText(t); }
+  catch(e){ const a=document.createElement("textarea"); a.value=t; document.body.appendChild(a); a.select(); document.execCommand("copy"); a.remove(); }
+}
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button[data-act]"); if(!b) return;
+  const s = b.dataset.s, a = b.dataset.act, el = box[s];
+  if(a==="copy"){ await copyText(el.value); setStatus("コピーしました"); }
+  else if(a==="paste"){
+    try{ const t = await navigator.clipboard.readText(); el.value = t; count(s); if(s==="L") schedule(); setStatus("貼り付けました"); }
+    catch(err){ el.focus(); setStatus("ブラウザが許可しない場合は Ctrl+V（Macは⌘+V）で貼り付けてください", true); }
+  }
+  else if(a==="clear"){ el.value=""; count(s); el.focus(); }
+  else if(a==="rev"){ run("R"); }
+  else if(a==="fs+"||a==="fs-"){ S["fs"+s]=Math.min(60,Math.max(10,S["fs"+s]+(a==="fs+"?2:-2))); el.style.fontSize=S["fs"+s]+"px"; save(); }
+  else if(a==="h+"||a==="h-"){ S["h"+s]=Math.min(1200,Math.max(100,Math.round(el.getBoundingClientRect().height)+(a==="h+"?80:-80))); el.style.height=S["h"+s]+"px"; save(); }
+});
+</script>
+</body>
+</html>

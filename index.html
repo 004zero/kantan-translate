@@ -27,6 +27,12 @@
   .bd{position:absolute;left:0;top:0;z-index:0;overflow:hidden;color:transparent;border-color:transparent;pointer-events:none;margin:0}
   .bd mark{color:transparent;background:rgba(250,204,21,.38);border-radius:3px}
   .bd mark.s{background:rgba(249,115,22,.62)}
+  textarea.plain{height:110px;font-size:16px}
+  #paneN,#palette{margin-top:14px}
+  .grp{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .gl{font-size:12px;color:var(--sub);min-width:5.5em}
+  .chip{font-size:13px;padding:4px 10px}
+  .chip.neg{border-color:#f87171}
   #hint{min-height:1.6em;margin-top:10px;font-size:15px;color:var(--text)}
   #hint .sub{color:var(--sub);font-size:13px}
   textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
@@ -46,6 +52,7 @@
     <button class="primary" id="go">翻訳する (Ctrl+Enter)</button>
     <button id="swap" title="言語と内容を入れ替え">⇄ 入れ替え</button>
     <label class="chk"><input type="checkbox" id="auto"> 入力しながら自動翻訳</label>
+    <label class="chk" title="(重み:1.2) [ ] <lora:…> BREAK を壊さず、カンマごとのタグ単位で翻訳します"><input type="checkbox" id="sd"> SDプロンプトモード</label>
     <span id="status"></span>
   </div>
 
@@ -63,6 +70,7 @@
         <button data-act="fs-" data-s="L">A−</button><button data-act="fs+" data-s="L">A＋</button>
         <span class="lbl">高さ</span>
         <button data-act="h-" data-s="L">−</button><button data-act="h+" data-s="L">＋</button>
+        <span class="lbl">重み</span><button data-act="w-" data-s="L" title="選択部分の重みを下げる (Ctrl+↓)">−0.1</button><button data-act="w+" data-s="L" title="選択部分の重みを上げる (Ctrl+↑)">+0.1</button>
         <span class="cnt" id="cntL">0文字</span>
       </div>
     </section>
@@ -80,11 +88,32 @@
         <button data-act="fs-" data-s="R">A−</button><button data-act="fs+" data-s="R">A＋</button>
         <span class="lbl">高さ</span>
         <button data-act="h-" data-s="R">−</button><button data-act="h+" data-s="R">＋</button>
+        <span class="lbl">重み</span><button data-act="w-" data-s="R" title="選択部分の重みを下げる (Ctrl+↓)">−0.1</button><button data-act="w+" data-s="R" title="選択部分の重みを上げる (Ctrl+↑)">+0.1</button>
         <span class="cnt" id="cntR">0文字</span>
       </div>
     </section>
   </div>
   <div id="hint">文字をドラッグ（選択）すると、反対側の対応する部分が黄色で光ります。</div>
+
+  <section class="pane" id="paneN">
+    <div class="head"><b>ネガティブプロンプト</b><span class="lbl">入れたくない要素。日本語で書いて英語に翻訳もできます</span></div>
+    <textarea id="boxN" class="plain" placeholder="例: lowres, bad hands, 低品質, 透かし …" spellcheck="false"></textarea>
+    <div class="tools">
+      <button data-act="paste" data-s="N">📋 貼り付け</button>
+      <button data-act="copy" data-s="N">コピー</button>
+      <button data-act="clear" data-s="N">消去</button>
+      <button data-act="ntr" data-s="N">→ 右の言語へ翻訳</button>
+      <button data-act="nundo" data-s="N">元に戻す</button>
+      <span class="lbl">重み</span>
+      <button data-act="w-" data-s="N">−0.1</button><button data-act="w+" data-s="N">+0.1</button>
+      <span class="sp"></span><span class="cnt" id="cntN">0文字</span>
+    </div>
+  </section>
+
+  <section class="pane" id="palette">
+    <div class="head"><b>定番タグ</b><span class="lbl" id="insTo">押すと、最後にカーソルを置いた枠（左/右）に追加。ネガティブ用は下の枠へ。</span></div>
+    <div id="chips"></div>
+  </section>
 </main>
 
 <script>
@@ -93,6 +122,7 @@ const $ = id => document.getElementById(id);
 const box = {L:$("boxL"), R:$("boxR")}, lang = {L:$("langL"), R:$("langR")}, cnt = {L:$("cntL"), R:$("cntR")};
 const status = $("status");
 const bd = {L:$("bdL"), R:$("bdR")};
+box.N = $("boxN"); cnt.N = $("cntN");
 let detectedLang = null;
 let map = null, hl = {L:null, R:null};   // map: 対応表 [{L:[a,b],R:[c,d]}] / hl: ハイライト範囲
 
@@ -104,12 +134,12 @@ function fill(sel, withAuto){
 fill(lang.L, true); fill(lang.R, false);
 
 // 設定の保存・復元
-const S = {fsL:18, fsR:18, hL:260, hR:260, sl:"auto", tl:"ja", auto:false};
+const S = {fsL:18, fsR:18, hL:260, hR:260, sl:"auto", tl:"ja", auto:false, sd:true};
 try{ Object.assign(S, JSON.parse(localStorage.getItem("trans-settings")||"{}")); }catch(e){}
 const save = () => { try{ localStorage.setItem("trans-settings", JSON.stringify(S)); }catch(e){} };
 function apply(){
   for(const s of ["L","R"]){ box[s].style.fontSize = S["fs"+s]+"px"; box[s].style.height = S["h"+s]+"px"; }
-  lang.L.value = S.sl; lang.R.value = S.tl; $("auto").checked = S.auto;
+  lang.L.value = S.sl; lang.R.value = S.tl; $("auto").checked = S.auto; $("sd").checked = S.sd;
   renderBoth();
 }
 
@@ -144,8 +174,23 @@ function invalidate(){ map=null; hl={L:null,R:null}; $("hint").innerHTML=""; ren
 });
 
 function setStatus(t, err){ status.textContent = t||""; status.className = err ? "err" : ""; }
-function count(s){ cnt[s].textContent = box[s].value.length.toLocaleString()+"文字"; }
+// CLIPトークンの目安（重み・括弧・LoRAタグは数えず、BREAKごとの最大値）
+function tokEst(text){
+  let best=0;
+  for(const ch of text.split(/\bBREAK\b/)){
+    const t=ch.replace(/<[^>]*>/g," ").replace(/:\s*-?\d*\.?\d+(?=\s*[)\]])/g,"").replace(/[()\[\]{}]/g," ");
+    let n=0; for(const w of (t.match(/[A-Za-z0-9']+|[^\sA-Za-z0-9']/g)||[])) n += /^[A-Za-z0-9']+$/.test(w) ? Math.max(1,Math.ceil(w.length/7)) : 1;
+    best=Math.max(best,n);
+  }
+  return best;
+}
+function count(s){
+  const v=box[s].value; let h=v.length.toLocaleString()+"文字", warn=false;
+  if(v && (v.match(/[\x00-\x7F]/g)||[]).length/v.length>0.7){ const n=tokEst(v); h+=" ・約"+n+"/75トークン"; warn=n>75; }
+  cnt[s].textContent=h; cnt[s].style.color=warn?"#dc2626":"";
+}
 ["L","R"].forEach(s => box[s].addEventListener("input", () => { count(s); invalidate(); if(s==="L") schedule(); }));
+box.N.addEventListener("input", () => count("N"));
 
 // ---- 翻訳本体 ----
 // 文・読点ごとに分割（対応づけの単位）
@@ -189,21 +234,54 @@ async function one(p, sl, tl){
   try{ return await viaGoogle(p, sl, tl); }
   catch(e){ return await viaMyMemory(p.slice(0,450), sl, tl); }
 }
-async function translate(text, sl, tl){
-  const pieces = segmentize(text);
+const hw = t => t.replace(/（/g,"(").replace(/）/g,")").replace(/［/g,"[").replace(/］/g,"]").replace(/｛/g,"{").replace(/｝/g,"}").replace(/：/g,":");
+// SDモード: カンマ・改行ごとに分割
+function sdSegmentize(text){
+  const out=[]; let st=0;
+  for(let i=0;i<text.length;i++){
+    const c=text[i]; if(!",、，\n".includes(c)) continue;
+    let e=i+1; while(e<text.length && /[ \t　]/.test(text[e])) e++;
+    if(c==="\n") while(e<text.length && /\s/.test(text[e])) e++;
+    out.push([st,e]); st=e; i=e-1;
+  }
+  if(st<text.length) out.push([st,text.length]);
+  return out;
+}
+// 1タグを「前の括弧 / 翻訳する本文 / 重み・閉じ括弧・区切り」に分ける
+function splitSD(piece){
+  const lead=piece.match(/^[\s(（\[［{｛]*/)[0]; let rest=piece.slice(lead.length);
+  const sep=rest.match(/[,、，]?\s*$/)[0]; rest=rest.slice(0,rest.length-sep.length);
+  const CL=/[\s)）\]］}｝]*$/;
+  const cl1=rest.match(CL)[0]; rest=rest.slice(0,rest.length-cl1.length);
+  const wm=rest.match(/[:：]\s*-?\d*\.?\d+$/), wt=wm?wm[0]:""; rest=rest.slice(0,rest.length-wt.length);
+  const cl2=rest.match(CL)[0]; rest=rest.slice(0,rest.length-cl2.length);
+  const t=rest.trim();
+  return {lead, core:rest, trail:cl2+wt+cl1+sep, skip: !t || /^<.*>$/.test(t) || /^BREAK$/i.test(t) || /^[\d.\s]+$/.test(t)};
+}
+async function translate(text, sl, tl, sd){
+  const pieces = (sd ? sdSegmentize : segmentize)(text);
   const cjk = /^(ja|zh|th)/.test(tl);
-  const rs = await pool(pieces, 4, ([a,b]) => {
-    const core = text.slice(a,b).trim();
-    return core ? one(core, sl, tl) : null;
+  const parts = pieces.map(([a,b]) => {
+    const p=text.slice(a,b);
+    if(sd) return {a, ...splitSD(p)};
+    const m=p.match(/^(\s*)([\s\S]*?)(\s*)$/); return {a, lead:m[1], core:m[2], trail:m[3], skip:false};
   });
+  const rs = await pool(parts, 4, p => (p.core.trim() && !p.skip) ? one(p.core.trim(), sl, tl) : null);
   let tgt="", segs=[], detected=null;
-  pieces.forEach(([a,b], k) => {
-    const piece=text.slice(a,b), m=piece.match(/^(\s*)([\s\S]*?)(\s*)$/), lead=m[1], core=m[2], trail=m[3];
-    if(!core){ tgt+=piece; return; }
-    const t=rs[k].text.trim(); detected = detected || rs[k].detected;
+  parts.forEach((p, k) => {
+    if(!p.core.trim()){ tgt += p.lead+p.trail; return; }
+    let t;
+    if(p.skip) t=p.core;
+    else{
+      t=rs[k].text.trim(); detected = detected || rs[k].detected;
+      if(sd){ t=t.replace(/[。．.]+$/,""); if(tl==="en") t=t.toLowerCase(); }
+    }
+    let lead=p.lead, trail=p.trail;
+    if(sd && !cjk){ lead=hw(lead); trail=hw(trail).replace(/[、，]\s*/g,", "); }
     tgt+=lead; const c=tgt.length; tgt+=t;
-    segs.push({src:[a+lead.length, a+lead.length+core.length], tgt:[c, tgt.length]});
-    tgt += k===pieces.length-1 ? trail : (/\n/.test(trail) ? trail : (cjk ? "" : " "));
+    segs.push({src:[p.a+p.lead.length, p.a+p.lead.length+p.core.length], tgt:[c, tgt.length]});
+    if(sd) tgt+=trail;
+    else tgt += k===parts.length-1 ? trail : (/\n/.test(trail) ? trail : (cjk ? "" : " "));
   });
   return {text:tgt, detected, segs};
 }
@@ -217,7 +295,7 @@ async function run(from){           // from: "L"→右へ / "R"→左へ
   const tl = to==="R" ? lang.R.value : (lang.L.value==="auto" ? (detectedLang||"en") : lang.L.value);
   const my = ++seq; setStatus("翻訳中…");
   try{
-    const r = await translate(text, sl, tl);
+    const r = await translate(text, sl, tl, S.sd);
     if(my!==seq) return;
     box[to].value = r.text; count(to);
     map = {segs: r.segs.map(g => from==="L" ? {L:g.src, R:g.tgt} : {R:g.src, L:g.tgt})};
@@ -251,6 +329,7 @@ async function copyText(t){
 document.addEventListener("click", async e => {
   const b = e.target.closest("button[data-act]"); if(!b) return;
   const s = b.dataset.s, a = b.dataset.act, el = box[s];
+  if(s==="N"){ negAct(a); return; }
   if(a==="copy"){ await copyText(el.value); setStatus("コピーしました"); }
   else if(a==="paste"){
     try{ const t = await navigator.clipboard.readText(); el.value = t; count(s); invalidate(); if(s==="L") schedule(); setStatus("貼り付けました"); }
@@ -258,6 +337,7 @@ document.addEventListener("click", async e => {
   }
   else if(a==="clear"){ el.value=""; count(s); invalidate(); el.focus(); }
   else if(a==="rev"){ run("R"); }
+  else if(a==="w+"||a==="w-"){ adjustWeight(s, a==="w+" ? 0.1 : -0.1); }
   else if(a==="fs+"||a==="fs-"){ S["fs"+s]=Math.min(60,Math.max(10,S["fs"+s]+(a==="fs+"?2:-2))); el.style.fontSize=S["fs"+s]+"px"; sync(s); save(); }
   else if(a==="h+"||a==="h-"){ S["h"+s]=Math.min(1200,Math.max(100,Math.round(el.getBoundingClientRect().height)+(a==="h+"?80:-80))); el.style.height=S["h"+s]+"px"; save(); }
 });
@@ -298,6 +378,79 @@ function selRun(s){
 }
 ["L","R"].forEach(s => ["select","mouseup","keyup","touchend","selectionchange"].forEach(ev =>
   box[s].addEventListener(ev, () => requestAnimationFrame(() => selRun(s)))));
+
+// ---- 重み調整 ( ) と :1.1 ----
+function adjustWeight(s, d){
+  const el=box[s], v=el.value; let a=el.selectionStart, b=el.selectionEnd;
+  if(a===b){            // 選択がなければカーソル位置のタグ（カンマ区切り）を対象に
+    let ts=a>0 ? v.lastIndexOf(",", a-1)+1 : 0, te=v.indexOf(",", a); if(te<0) te=v.length;
+    while(ts<te && v[ts]===" ") ts++; while(te>ts && v[te-1]===" ") te--;
+    a=ts; b=te;
+  }
+  if(a>=b) return;
+  let inner, w=1, from=a, to=b;
+  const sel=v.slice(a,b), m2=sel.match(/^\(([\s\S]*?)[:：]\s*(-?\d*\.?\d+)\)$/), mm=v.slice(b).match(/^\s*[:：]\s*(-?\d*\.?\d+)\)/);
+  if(m2){ inner=m2[1]; w=parseFloat(m2[2]); }
+  else if(v[a-1]==="(" && mm){ inner=sel; w=parseFloat(mm[1]); from=a-1; to=b+mm[0].length; }
+  else inner=sel;
+  inner=inner.trim(); w=Math.max(0.1, Math.round((w+d)*100)/100);
+  const out = Math.abs(w-1)<0.001 ? inner : "("+inner+":"+w+")";
+  el.setRangeText(out, from, to, "select"); el.focus();
+  count(s); if(s!=="N") invalidate();
+}
+["L","R","N"].forEach(s => box[s].addEventListener("keydown", e => {
+  if((e.ctrlKey||e.metaKey) && (e.key==="ArrowUp"||e.key==="ArrowDown")){ e.preventDefault(); adjustWeight(s, e.key==="ArrowUp" ? 0.1 : -0.1); }
+}));
+
+// ---- ネガティブ欄 ----
+let negBackup=null;
+async function negAct(a){
+  const el=box.N;
+  if(a==="copy"){ await copyText(el.value); setStatus("コピーしました"); }
+  else if(a==="paste"){ try{ el.value=await navigator.clipboard.readText(); count("N"); setStatus("貼り付けました"); }catch(e){ el.focus(); setStatus("Ctrl+V（Macは⌘+V）で貼り付けてください", true); } }
+  else if(a==="clear"){ el.value=""; count("N"); el.focus(); }
+  else if(a==="w+"||a==="w-"){ adjustWeight("N", a==="w+" ? 0.1 : -0.1); }
+  else if(a==="nundo"){ if(negBackup!==null){ el.value=negBackup; negBackup=null; count("N"); } }
+  else if(a==="ntr"){
+    if(!el.value.trim()) return;
+    negBackup=el.value; setStatus("翻訳中…");
+    try{ const r=await translate(el.value, "auto", lang.R.value, true); el.value=r.text; count("N"); setStatus("ネガティブを翻訳しました（「元に戻す」で戻せます）"); }
+    catch(e){ setStatus("翻訳できませんでした（ネット接続を確認してください）", true); }
+  }
+}
+
+// ---- 定番タグ ----
+const PRESETS=[
+ {g:"品質", items:[["傑作・最高品質","masterpiece, best quality"],["高解像度","highres, ultra detailed"],["8k・精細","8k, intricate details, sharp focus"]]},
+ {g:"画風", items:[["写真風","photorealistic, realistic"],["アニメ風","anime style"],["イラスト","illustration"],["水彩","watercolor"]]},
+ {g:"光・カメラ", items:[["映画的な光","cinematic lighting"],["柔らかい光","soft lighting"],["背景ぼかし","depth of field, bokeh"],["逆光","backlighting"]]},
+ {g:"構図", items:[["バストアップ","upper body"],["全身","full body"],["顔アップ","close-up"],["俯瞰","from above"],["あおり","from below"],["カメラ目線","looking at viewer"]]},
+ {g:"ネガティブ用", neg:true, items:[["定番セット","lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"],["低品質(重み付き)","(worst quality, low quality:1.4)"],["崩れ防止","deformed, disfigured, mutated hands, extra limbs, extra fingers, poorly drawn face"],["文字・透かし","text, watermark, signature, logo"]]}
+];
+let insTarget="R";
+["L","R"].forEach(s => box[s].addEventListener("focus", () => { insTarget=s; }));
+function insertTags(s, text){
+  const el=box[s], v=el.value, a=el.selectionStart, b=el.selectionEnd;
+  const before=v.slice(0,a).replace(/\s+$/,""), after=v.slice(b).replace(/^[\s,]+/,"");
+  const head = before + (before ? (before.endsWith(",") ? " " : ", ") : "") + text;
+  el.value = head + (after ? ", "+after : "");
+  el.focus(); el.setSelectionRange(head.length, head.length);
+  count(s); if(s!=="N") invalidate();
+  setStatus((s==="L"?"左":s==="R"?"右":"ネガティブ")+"の枠に追加しました");
+}
+$("chips").innerHTML = "";
+PRESETS.forEach(g => {
+  const row=document.createElement("div"); row.className="grp"; row.style.marginTop="6px";
+  row.innerHTML='<span class="gl">'+g.g+'</span>';
+  g.items.forEach(([label,text]) => {
+    const b=document.createElement("button"); b.className="chip"+(g.neg?" neg":""); b.textContent=label; b.title=text;
+    b.onclick=() => insertTags(g.neg ? "N" : insTarget, text);
+    row.appendChild(b);
+  });
+  $("chips").appendChild(row);
+});
+
+$("sd").onchange = e => { S.sd=e.target.checked; save(); };
 apply();
 </script>
 </body>

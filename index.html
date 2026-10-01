@@ -114,7 +114,7 @@
   </section>
 
   <section class="pane" id="palette">
-    <div class="head"><b>定番タグ</b><span class="lbl" id="insTo">押すと、最後にカーソルを置いた枠（左/右）に追加。ネガティブ用は下の枠へ。</span></div>
+    <div class="head"><b>定番タグ</b><input id="chipq" type="search" placeholder="検索（例: 笑顔 / smile）" style="font:inherit;padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--text)"><span class="lbl" id="insTo">押すと、最後にカーソルを置いた枠（左/右）に追加。ネガティブ用は下の枠へ。</span></div>
     <div id="chips"></div>
   </section>
 </main>
@@ -452,10 +452,13 @@ async function negAct(a){
 
 // ---- 定番タグ ----
 const PRESETS=[
- {g:"品質", items:[["傑作・最高品質","masterpiece, best quality"],["高解像度","highres, ultra detailed"],["8k・精細","8k, intricate details, sharp focus"]]},
+ {g:"品質", open:true, items:[["傑作・最高品質","masterpiece, best quality"],["傑作・高品質","masterpiece, high quality"],["最高品質","best quality"],["非常に高品質","extremely high quality, ultra detailed"],["高解像度","highres, ultra detailed"],["8k・精細","8k, intricate details, sharp focus"],["立体感・リアル感","realistic, depth, volumetric lighting, ambient occlusion, detailed shading, subsurface scattering"]]},
  {g:"画風", items:[["写真風","photorealistic, realistic"],["アニメ風","anime style"],["イラスト","illustration"],["水彩","watercolor"]]},
- {g:"光・カメラ", items:[["映画的な光","cinematic lighting"],["柔らかい光","soft lighting"],["背景ぼかし","depth of field, bokeh"],["逆光","backlighting"]]},
- {g:"構図", items:[["バストアップ","upper body"],["全身","full body"],["顔アップ","close-up"],["俯瞰","from above"],["あおり","from below"],["カメラ目線","looking at viewer"]]},
+ {g:"光", items:[["映画的な光","cinematic lighting"],["柔らかい光","soft lighting"],["背景ぼかし","depth of field, bokeh"],["逆光","backlighting"]]},
+ {g:"アングル・カメラ", open:true, items:[["ダッチアングル","dutch angle"],["上から","from above"],["正面から","from front, front view"],["斜め上から","high angle, from above, diagonal view"],["斜め上から２","from above, from side, dynamic angle"],["煽り","from below, low angle"],["斜め","angled shot, three-quarter view"],["魚眼","fisheye lens, wide angle"],["奥行強調","foreshortening, perspective, depth of field"],["もも上(被写体サイズ)","cowboy shot"],["バストアップ","upper body"],["全身","full body"],["顔アップ","close-up"]]},
+ {g:"フォーカス", items:[["太ももフォーカス","thigh focus"],["胸フォーカス","breast focus"],["お尻フォーカス","ass focus"]]},
+ {g:"目線・表情", open:true, items:[["カメラ目線","looking at viewer"],["カメラ目線２","looking at viewer, eye contact, direct gaze"],["上目遣い","looking up, upturned eyes"],["ハニカミ","shy smile, embarrassed smile"],["赤面","blush"],["笑顔","smile"],["微笑み","light smile, gentle smile"],["満面の笑み","big smile, open mouth, happy"]]},
+ {g:"ポーズ", items:[["うつ伏せで頬に手","lying on stomach, hand on own cheek"],["膝を立てて寝る","lying, on back, knees up"],["脚を組む","crossed legs"],["もたれかかる","leaning, leaning back"],["丸まって寝る","curled up, sleeping, fetal position"],["両膝をたてる","knees up"],["片膝をたてる","one knee up"],["足を上げる","leg up, raised leg"],["足首を組む","crossed ankles"],["足指を丸める","curled toes"],["つま先を伸ばす","pointed toes"],["しゃがむ","squatting"],["片膝をつく","one knee, kneeling on one knee"],["膝をつく","kneeling"]]},
  {g:"ネガティブ用", neg:true, items:[["定番セット","lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"],["低品質(重み付き)","(worst quality, low quality:1.4)"],["崩れ防止","deformed, disfigured, mutated hands, extra limbs, extra fingers, poorly drawn face"],["文字・透かし","text, watermark, signature, logo"]]}
 ];
 let insTarget="R";
@@ -469,16 +472,23 @@ function insertTags(s, text){
   count(s); if(s!=="N") invalidate();
   setStatus((s==="L"?"左":s==="R"?"右":"ネガティブ")+"の枠に追加しました");
 }
-$("chips").innerHTML = "";
+const chipEls=[];
 PRESETS.forEach(g => {
+  const det=document.createElement("details"); det.open=!!g.open; det.style.marginTop="6px";
+  const sm=document.createElement("summary"); sm.textContent=g.g+"（"+g.items.length+"）"; sm.style.cursor="pointer"; sm.style.fontSize="13px";
   const row=document.createElement("div"); row.className="grp"; row.style.marginTop="6px";
-  row.innerHTML='<span class="gl">'+g.g+'</span>';
+  det.append(sm,row);
   g.items.forEach(([label,text]) => {
     const b=document.createElement("button"); b.className="chip"+(g.neg?" neg":""); b.textContent=label; b.title=text;
     b.onclick=() => insertTags(g.neg ? "N" : insTarget, text);
-    row.appendChild(b);
+    row.appendChild(b); chipEls.push({b,label,text,det,open:!!g.open});
   });
-  $("chips").appendChild(row);
+  $("chips").appendChild(det);
+});
+$("chipq").addEventListener("input", e => {
+  const q=e.target.value.trim().toLowerCase(), hit=new Set();
+  chipEls.forEach(c => { const m=!q || (c.label+" "+c.text).toLowerCase().includes(q); c.b.style.display=m?"":"none"; if(m) hit.add(c.det); });
+  chipEls.forEach(c => { if(q) c.det.open=hit.has(c.det); else c.det.open=c.open; c.det.style.display=(!q||hit.has(c.det))?"":"none"; });
 });
 
 $("sd").onchange = e => { S.sd=e.target.checked; save(); };

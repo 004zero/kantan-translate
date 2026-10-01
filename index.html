@@ -33,6 +33,8 @@
   .gl{font-size:12px;color:var(--sub);min-width:5.5em}
   .chip{font-size:13px;padding:4px 10px}
   .chip.neg{border-color:#f87171}
+  #cands{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
+  .chip.sd{border-color:var(--accent)}
   #hint{min-height:1.6em;margin-top:10px;font-size:15px;color:var(--text)}
   #hint .sub{color:var(--sub);font-size:13px}
   textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
@@ -94,6 +96,7 @@
     </section>
   </div>
   <div id="hint">文字をドラッグ（選択）すると、反対側の対応する部分が黄色で光ります。</div>
+  <div id="cands"></div>
 
   <section class="pane" id="paneN">
     <div class="head"><b>ネガティブプロンプト</b><span class="lbl">入れたくない要素。日本語で書いて英語に翻訳もできます</span></div>
@@ -166,7 +169,7 @@ function renderBd(s){
   bd[s].innerHTML=html+"\u200b"; sync(s);
 }
 function renderBoth(){ renderBd("L"); renderBd("R"); }
-function invalidate(){ map=null; hl={L:null,R:null}; $("hint").innerHTML=""; renderBoth(); }
+function invalidate(){ map=null; hl={L:null,R:null}; $("hint").innerHTML=""; $("cands").innerHTML=""; renderBoth(); }
 ["L","R"].forEach(s => {
   new ResizeObserver(() => sync(s)).observe(box[s]);
   box[s].addEventListener("scroll", () => { bd[s].scrollTop=box[s].scrollTop; });
@@ -229,6 +232,24 @@ async function viaMyMemory(q, sl, tl){
   const j = await r.json();
   if(j.responseStatus!==200) throw new Error(j.responseDetails||"翻訳失敗");
   return {text:j.responseData.translatedText, detected:null};
+}
+// Googleの別訳・辞書候補つき翻訳（短い語句用）
+const selCache = new Map();
+async function getAlts(q, sl, tl){
+  const key=sl+"|"+tl+"|"+q; if(selCache.has(key)) return selCache.get(key);
+  let res;
+  try{
+    const r = await fetch("https://translate.googleapis.com/translate_a/single", {
+      method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
+      body:"client=gtx&dt=t&dt=at&dt=bd&sl="+encodeURIComponent(sl)+"&tl="+encodeURIComponent(tl)+"&q="+encodeURIComponent(q)
+    });
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const j = await r.json(), alts=[];
+    (j[5]||[]).forEach(x => (x[2]||[]).forEach(y => alts.push(y[0])));
+    (j[1]||[]).forEach(x => (x[1]||[]).forEach(y => alts.push(y)));
+    res = {text:j[0].map(x=>x[0]).join(""), alts};
+  }catch(e){ res = {...(await viaMyMemory(q, sl, tl)), alts:[]}; }
+  selCache.set(key,res); return res;
 }
 async function one(p, sl, tl){
   try{ return await viaGoogle(p, sl, tl); }
@@ -344,8 +365,7 @@ document.addEventListener("click", async e => {
 
 // ---- ドラッグ選択 → 反対側の対応箇所を光らせる ----
 let selTimer, selTok=0;
-const selCache = new Map();
-function clearHl(){ if(hl.L||hl.R){ hl={L:null,R:null}; $("hint").innerHTML=""; renderBoth(); } }
+function clearHl(){ $("cands").innerHTML=""; if(hl.L||hl.R){ hl={L:null,R:null}; $("hint").innerHTML=""; renderBoth(); } }
 function selRun(s){
   const el=box[s], a=el.selectionStart, b=el.selectionEnd, o=s==="L"?"R":"L", tok=++selTok;
   clearTimeout(selTimer);
@@ -361,9 +381,10 @@ function selRun(s){
   $("hint").innerHTML='<span class="sub">対応する文を表示中…</span>';
   selTimer=setTimeout(async () => {
     const sl=lang[s].value, tl=o==="R" ? lang.R.value : (lang.L.value==="auto" ? (detectedLang||"en") : lang.L.value);
-    const key=sl+"|"+tl+"|"+picked; let t=selCache.get(key);
-    try{ if(t===undefined){ t=(await viaGoogle(picked, sl, tl)).text.trim(); selCache.set(key,t); } }
+    let r;
+    try{ r = await getAlts(picked, sl, tl); }
     catch(e){ return; }
+    const t=r.text.trim();
     if(tok!==selTok) return;
     const segO=box[o].value.slice(seg[o][0], seg[o][1]);
     const needle=t.replace(/[。．.!?！？、，,]+$/,"").toLowerCase();
@@ -374,6 +395,16 @@ function selRun(s){
       renderBoth();
     }
     $("hint").innerHTML=`「${esc(picked)}」 → <b>「${esc(t)}」</b>` + (idx>=0 ? "" : ' <span class="sub">（文中の正確な位置は特定できないため、対応する文全体を表示しています）</span>');
+    // 右側（出力側）の言い換え候補
+    if(idx>=0){
+      let cr=r, phrase=picked, csl=sl, ctl=tl;
+      if(s==="R"){
+        phrase=box.L.value.slice(hl.L.strong[0], hl.L.strong[1]); csl=lang.L.value; ctl=lang.R.value;
+        try{ cr = await getAlts(phrase, csl, ctl); }catch(e){ return; }
+        if(tok!==selTok) return;
+      }
+      showCands(seg, cr, phrase);
+    } else $("cands").innerHTML="";
   }, 250);
 }
 ["L","R"].forEach(s => ["select","mouseup","keyup","touchend","selectionchange"].forEach(ev =>
@@ -451,6 +482,56 @@ PRESETS.forEach(g => {
 });
 
 $("sd").onchange = e => { S.sd=e.target.checked; save(); };
+
+// ---- 言い換え候補 ----
+const GLOSS=[
+ ["悪い手",["bad hands","mutated hands","malformed hands"]],["手",["hands","hand"]],["指",["fingers","finger"]],
+ ["余分な指",["extra fingers","extra digit"]],["指が欠けている",["missing fingers"]],["余分な手足",["extra limbs"]],
+ ["傑作",["masterpiece"]],["最高品質",["best quality"]],["高品質",["high quality","best quality"]],["低品質",["low quality","worst quality"]],
+ ["最低品質",["worst quality"]],["高解像度",["highres","high resolution"]],["低解像度",["lowres"]],["超詳細",["ultra detailed","extremely detailed"]],
+ ["透かし",["watermark"]],["署名",["signature"]],["ロゴ",["logo"]],["文字",["text"]],["ぼやけた",["blurry"]],["ぼかし",["blur","bokeh"]],
+ ["背景ぼかし",["depth of field","bokeh"]],["解剖学的に誤り",["bad anatomy"]],["変形",["deformed","disfigured"]],["醜い",["ugly"]],
+ ["切り取られた",["cropped"]],["重複",["duplicate"]],["JPEGノイズ",["jpeg artifacts"]],
+ ["青い目",["blue eyes"]],["長い髪",["long hair"]],["短い髪",["short hair"]],["笑顔",["smile","smiling"]],
+ ["女の子",["1girl","girl"]],["男の子",["1boy","boy"]],["美しい",["beautiful"]],["可愛い",["cute"]],
+ ["全身",["full body"]],["上半身",["upper body"]],["顔アップ",["close-up","portrait"]],["顔",["face"]],["目",["eyes"]],["髪",["hair"]],
+ ["制服",["school uniform"]],["着物",["kimono"]],["桜",["cherry blossoms"]],["夕焼け",["sunset"]],["夜",["night"]],
+ ["逆光",["backlighting"]],["映画的な照明",["cinematic lighting"]],["写真のようにリアル",["photorealistic"]],["アニメ風",["anime style"]],
+ ["水彩",["watercolor"]],["油絵",["oil painting"]],["カメラ目線",["looking at viewer"]],["俯瞰",["from above"]],["あおり",["from below"]],
+ ["横顔",["profile","from side"]],["背景",["background"]],["白背景",["white background"]],["単色背景",["simple background"]]
+];
+function glossCands(phrase){
+  if(lang.R.value!=="en") return [];
+  const hit=GLOSS.filter(([ja]) => phrase.includes(ja) || (phrase.length>=2 && ja.includes(phrase)));
+  hit.sort((a,b) => (b[0]===phrase)-(a[0]===phrase) || b[0].length-a[0].length);
+  const top=hit.length ? hit[0][0].length : 0;   // 一番長く一致した語だけ使う（「悪い手」で「手」を出さない）
+  return hit.filter(([ja]) => ja.length===top).flatMap(([,en]) => en);
+}
+let candSeg=null;
+function showCands(seg, r, phrase){
+  candSeg=seg;
+  const seen=new Set(), list=[], en=lang.R.value==="en";
+  const add=(t,sd) => { t=(t||"").trim().replace(/[。．.!?！？]+$/,""); if(en) t=t.toLowerCase(); const k=t.toLowerCase(); if(!t||seen.has(k)) return; seen.add(k); list.push([t,sd]); };
+  glossCands(phrase).forEach(t => add(t,true));
+  add(r.text,false); r.alts.forEach(t => add(t,false));
+  const box_=$("cands"); box_.innerHTML="";
+  if(!list.length) return;
+  const lb=document.createElement("span"); lb.className="lbl"; lb.textContent="言い換え候補（押すと置き換え）:"; box_.appendChild(lb);
+  list.slice(0,12).forEach(([t,sd]) => {
+    const b=document.createElement("button"); b.className="chip"+(sd?" sd":""); b.textContent=t;
+    b.title=sd?"SD向け辞書":"Google翻訳の候補"; b.onclick=() => pickCand(t);
+    box_.appendChild(b);
+  });
+}
+function pickCand(text){
+  const st=hl.R && hl.R.strong;
+  if(!st || !map || !candSeg){ copyText(text); setStatus("「"+text+"」をコピーしました"); return; }
+  const [x,y]=st, d=text.length-(y-x);
+  box.R.setRangeText(text, x, y, "preserve");
+  map.segs.forEach(g => { if(g===candSeg) g.R[1]+=d; else if(g.R[0]>=y){ g.R[0]+=d; g.R[1]+=d; } });
+  hl.R.light[1]+=d; hl.R.strong=[x, x+text.length];
+  count("R"); renderBoth(); setStatus("「"+text+"」に置き換えました");
+}
 apply();
 </script>
 </body>

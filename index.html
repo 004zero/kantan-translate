@@ -21,7 +21,14 @@
   button:hover{border-color:var(--accent)}
   button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;padding:8px 18px}
   button.primary:hover{background:var(--accent2)}
-  textarea{width:100%;height:260px;min-height:100px;resize:both;max-width:100%;font-size:18px;line-height:1.55;padding:10px;color:var(--text);background:transparent;border:1px solid var(--line);border-radius:8px;font-family:inherit}
+  .wrap{position:relative}
+  textarea,.bd{font-size:18px;line-height:1.55;padding:10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;white-space:pre-wrap;overflow-wrap:break-word;word-break:normal;letter-spacing:normal}
+  textarea{display:block;position:relative;z-index:1;width:100%;height:260px;min-height:100px;resize:both;max-width:100%;color:var(--text);background:transparent}
+  .bd{position:absolute;left:0;top:0;z-index:0;overflow:hidden;color:transparent;border-color:transparent;pointer-events:none;margin:0}
+  .bd mark{color:transparent;background:rgba(250,204,21,.38);border-radius:3px}
+  .bd mark.s{background:rgba(249,115,22,.62)}
+  #hint{min-height:1.6em;margin-top:10px;font-size:15px;color:var(--text)}
+  #hint .sub{color:var(--sub);font-size:13px}
   textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
   .tools{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
   .tools .sp{flex:1}
@@ -46,7 +53,7 @@
     <!-- 左 -->
     <section class="pane" id="paneL">
       <div class="head"><select id="langL"></select></div>
-      <textarea id="boxL" placeholder="ここに入力・貼り付け" spellcheck="false"></textarea>
+      <div class="wrap"><div class="bd" id="bdL"></div><textarea id="boxL" placeholder="ここに入力・貼り付け" spellcheck="false"></textarea></div>
       <div class="tools">
         <button data-act="paste" data-s="L">📋 貼り付け</button>
         <button data-act="copy" data-s="L">コピー</button>
@@ -62,7 +69,7 @@
     <!-- 右 -->
     <section class="pane" id="paneR">
       <div class="head"><select id="langR"></select></div>
-      <textarea id="boxR" placeholder="翻訳結果（ここも編集・貼り付けできます）" spellcheck="false"></textarea>
+      <div class="wrap"><div class="bd" id="bdR"></div><textarea id="boxR" placeholder="翻訳結果（ここも編集・貼り付けできます）" spellcheck="false"></textarea></div>
       <div class="tools">
         <button data-act="paste" data-s="R">📋 貼り付け</button>
         <button data-act="copy" data-s="R">コピー</button>
@@ -77,6 +84,7 @@
       </div>
     </section>
   </div>
+  <div id="hint">文字をドラッグ（選択）すると、反対側の対応する部分が黄色で光ります。</div>
 </main>
 
 <script>
@@ -84,6 +92,9 @@ const LANGS = [["ja","日本語"],["en","英語"],["zh-CN","中国語(簡体)"],
 const $ = id => document.getElementById(id);
 const box = {L:$("boxL"), R:$("boxR")}, lang = {L:$("langL"), R:$("langR")}, cnt = {L:$("cntL"), R:$("cntR")};
 const status = $("status");
+const bd = {L:$("bdL"), R:$("bdR")};
+let detectedLang = null;
+let map = null, hl = {L:null, R:null};   // map: 対応表 [{L:[a,b],R:[c,d]}] / hl: ハイライト範囲
 
 // 言語セレクト（左だけ自動検出あり）
 function fill(sel, withAuto){
@@ -99,30 +110,64 @@ const save = () => { try{ localStorage.setItem("trans-settings", JSON.stringify(
 function apply(){
   for(const s of ["L","R"]){ box[s].style.fontSize = S["fs"+s]+"px"; box[s].style.height = S["h"+s]+"px"; }
   lang.L.value = S.sl; lang.R.value = S.tl; $("auto").checked = S.auto;
+  renderBoth();
 }
-apply();
 
-// ドラッグで大きさを変えたときも記憶
-new ResizeObserver(() => {
-  for(const s of ["L","R"]){ const h = Math.round(box[s].getBoundingClientRect().height); if(h>50) S["h"+s]=h; }
-}).observe(box.L);
-new ResizeObserver(() => {}).observe(box.R);
-["L","R"].forEach(s => box[s].addEventListener("mouseup", () => { S["h"+s]=Math.round(box[s].getBoundingClientRect().height); save(); }));
+
+// ---- ハイライト用の背面レイヤー ----
+const esc = t => t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+function sync(s){
+  const ta=box[s], d=bd[s];
+  d.style.width=ta.offsetWidth+"px"; d.style.height=ta.offsetHeight+"px";
+  d.style.fontSize=ta.style.fontSize;
+  d.style.paddingRight=(10+ta.offsetWidth-ta.clientWidth-2)+"px";
+  d.scrollTop=ta.scrollTop;
+}
+function renderBd(s){
+  const t=box[s].value, h=hl[s]; let html;
+  if(!h) html=esc(t);
+  else{
+    const [a,b]=h.light, st=h.strong;
+    html=esc(t.slice(0,a))+'<mark>';
+    if(st && st[0]>=a && st[1]<=b) html+=esc(t.slice(a,st[0]))+'<mark class="s">'+esc(t.slice(st[0],st[1]))+'</mark>'+esc(t.slice(st[1],b));
+    else html+=esc(t.slice(a,b));
+    html+='</mark>'+esc(t.slice(b));
+  }
+  bd[s].innerHTML=html+"\u200b"; sync(s);
+}
+function renderBoth(){ renderBd("L"); renderBd("R"); }
+function invalidate(){ map=null; hl={L:null,R:null}; $("hint").innerHTML=""; renderBoth(); }
+["L","R"].forEach(s => {
+  new ResizeObserver(() => sync(s)).observe(box[s]);
+  box[s].addEventListener("scroll", () => { bd[s].scrollTop=box[s].scrollTop; });
+  box[s].addEventListener("mouseup", () => { S["h"+s]=Math.round(box[s].getBoundingClientRect().height); save(); });
+});
 
 function setStatus(t, err){ status.textContent = t||""; status.className = err ? "err" : ""; }
 function count(s){ cnt[s].textContent = box[s].value.length.toLocaleString()+"文字"; }
-["L","R"].forEach(s => box[s].addEventListener("input", () => { count(s); if(s==="L") schedule(); }));
+["L","R"].forEach(s => box[s].addEventListener("input", () => { count(s); invalidate(); if(s==="L") schedule(); }));
 
 // ---- 翻訳本体 ----
-function chunk(text, max){
-  const out=[]; let cur="";
-  for(const part of text.split(/(?<=[\n。．.!?！？])/)){
-    if((cur+part).length>max && cur){ out.push(cur); cur=""; }
-    if(part.length>max){ for(let i=0;i<part.length;i+=max) out.push(part.slice(i,i+max)); }
-    else cur+=part;
+// 文・読点ごとに分割（対応づけの単位）
+function segmentize(text){
+  const STRONG="。．!?！？", WEAK="、，,;；:：", CLOSE="」』）)\"'”’";
+  const out=[]; let st=0;
+  for(let i=0;i<text.length;i++){
+    const c=text[i], nx=text[i+1];
+    const strong = STRONG.includes(c) || (c==="." && (nx===undefined||/\s/.test(nx))) || c==="\n";
+    const weak = WEAK.includes(c) && i+1-st>=12;
+    if(!strong && !weak) continue;
+    let e=i+1;
+    while(e<text.length && (CLOSE.includes(text[e]) || /\s/.test(text[e]))) e++;
+    out.push([st,e]); st=e; i=e-1;
   }
-  if(cur) out.push(cur);
+  if(st<text.length) out.push([st,text.length]);
   return out;
+}
+async function pool(items, n, fn){
+  const res=new Array(items.length); let i=0;
+  await Promise.all(Array.from({length:Math.min(n,items.length)}, async()=>{ while(i<items.length){ const k=i++; res[k]=await fn(items[k],k); } }));
+  return res;
 }
 async function viaGoogle(q, sl, tl){
   const r = await fetch("https://translate.googleapis.com/translate_a/single", {
@@ -140,30 +185,44 @@ async function viaMyMemory(q, sl, tl){
   if(j.responseStatus!==200) throw new Error(j.responseDetails||"翻訳失敗");
   return {text:j.responseData.translatedText, detected:null};
 }
+async function one(p, sl, tl){
+  try{ return await viaGoogle(p, sl, tl); }
+  catch(e){ return await viaMyMemory(p.slice(0,450), sl, tl); }
+}
 async function translate(text, sl, tl){
-  const parts = chunk(text, 1500), res=[]; let detected=null;
-  for(const p of parts){
-    if(!p.trim()){ res.push(p); continue; }
-    let o;
-    try{ o = await viaGoogle(p, sl, tl); }
-    catch(e){ o = await viaMyMemory(p.slice(0,450), sl, tl); }
-    res.push(o.text); detected = detected || o.detected;
-  }
-  return {text:res.join(""), detected};
+  const pieces = segmentize(text);
+  const cjk = /^(ja|zh|th)/.test(tl);
+  const rs = await pool(pieces, 4, ([a,b]) => {
+    const core = text.slice(a,b).trim();
+    return core ? one(core, sl, tl) : null;
+  });
+  let tgt="", segs=[], detected=null;
+  pieces.forEach(([a,b], k) => {
+    const piece=text.slice(a,b), m=piece.match(/^(\s*)([\s\S]*?)(\s*)$/), lead=m[1], core=m[2], trail=m[3];
+    if(!core){ tgt+=piece; return; }
+    const t=rs[k].text.trim(); detected = detected || rs[k].detected;
+    tgt+=lead; const c=tgt.length; tgt+=t;
+    segs.push({src:[a+lead.length, a+lead.length+core.length], tgt:[c, tgt.length]});
+    tgt += k===pieces.length-1 ? trail : (/\n/.test(trail) ? trail : (cjk ? "" : " "));
+  });
+  return {text:tgt, detected, segs};
 }
 
 let seq = 0, timer;
 async function run(from){           // from: "L"→右へ / "R"→左へ
   const to = from==="L" ? "R" : "L";
   const text = box[from].value;
-  if(!text.trim()){ box[to].value=""; count(to); setStatus(""); return; }
+  if(!text.trim()){ box[to].value=""; count(to); invalidate(); setStatus(""); return; }
   const sl = from==="L" ? lang.L.value : lang.R.value;
-  const tl = to==="R" ? lang.R.value : (lang.L.value==="auto" ? "en" : lang.L.value);
+  const tl = to==="R" ? lang.R.value : (lang.L.value==="auto" ? (detectedLang||"en") : lang.L.value);
   const my = ++seq; setStatus("翻訳中…");
   try{
     const r = await translate(text, sl, tl);
     if(my!==seq) return;
     box[to].value = r.text; count(to);
+    map = {segs: r.segs.map(g => from==="L" ? {L:g.src, R:g.tgt} : {R:g.src, L:g.tgt})};
+    hl = {L:null, R:null}; $("hint").innerHTML=""; renderBoth();
+    if(from==="L" && sl==="auto" && r.detected) detectedLang = r.detected;
     const n = r.detected && sl==="auto" ? (LANGS.find(l=>l[0]===r.detected)||[,r.detected])[1] : "";
     setStatus(n ? "検出した言語: "+n : "完了");
   }catch(e){ if(my===seq) setStatus("翻訳できませんでした（ネット接続を確認してください）", true); }
@@ -177,9 +236,11 @@ lang.R.onchange = () => { S.tl=lang.R.value; save(); if(box.L.value.trim()) run(
 document.addEventListener("keydown", e => { if((e.ctrlKey||e.metaKey) && e.key==="Enter") run(document.activeElement===box.R ? "R" : "L"); });
 
 $("swap").onclick = () => {
-  const sl = lang.L.value==="auto" ? "en" : lang.L.value, tl = lang.R.value;
+  const sl = lang.L.value==="auto" ? (detectedLang||"en") : lang.L.value, tl = lang.R.value;
   lang.L.value = tl; lang.R.value = sl; S.sl=tl; S.tl=sl; save();
   const t = box.L.value; box.L.value = box.R.value; box.R.value = t; count("L"); count("R");
+  if(map) map.segs = map.segs.map(g => ({L:g.R, R:g.L}));
+  hl = {L:null, R:null}; $("hint").innerHTML=""; renderBoth();
 };
 
 // ---- コピー・貼り付け・サイズ変更（左右共通）----
@@ -192,14 +253,52 @@ document.addEventListener("click", async e => {
   const s = b.dataset.s, a = b.dataset.act, el = box[s];
   if(a==="copy"){ await copyText(el.value); setStatus("コピーしました"); }
   else if(a==="paste"){
-    try{ const t = await navigator.clipboard.readText(); el.value = t; count(s); if(s==="L") schedule(); setStatus("貼り付けました"); }
+    try{ const t = await navigator.clipboard.readText(); el.value = t; count(s); invalidate(); if(s==="L") schedule(); setStatus("貼り付けました"); }
     catch(err){ el.focus(); setStatus("ブラウザが許可しない場合は Ctrl+V（Macは⌘+V）で貼り付けてください", true); }
   }
-  else if(a==="clear"){ el.value=""; count(s); el.focus(); }
+  else if(a==="clear"){ el.value=""; count(s); invalidate(); el.focus(); }
   else if(a==="rev"){ run("R"); }
-  else if(a==="fs+"||a==="fs-"){ S["fs"+s]=Math.min(60,Math.max(10,S["fs"+s]+(a==="fs+"?2:-2))); el.style.fontSize=S["fs"+s]+"px"; save(); }
+  else if(a==="fs+"||a==="fs-"){ S["fs"+s]=Math.min(60,Math.max(10,S["fs"+s]+(a==="fs+"?2:-2))); el.style.fontSize=S["fs"+s]+"px"; sync(s); save(); }
   else if(a==="h+"||a==="h-"){ S["h"+s]=Math.min(1200,Math.max(100,Math.round(el.getBoundingClientRect().height)+(a==="h+"?80:-80))); el.style.height=S["h"+s]+"px"; save(); }
 });
+
+// ---- ドラッグ選択 → 反対側の対応箇所を光らせる ----
+let selTimer, selTok=0;
+const selCache = new Map();
+function clearHl(){ if(hl.L||hl.R){ hl={L:null,R:null}; $("hint").innerHTML=""; renderBoth(); } }
+function selRun(s){
+  const el=box[s], a=el.selectionStart, b=el.selectionEnd, o=s==="L"?"R":"L", tok=++selTok;
+  clearTimeout(selTimer);
+  if(!map || a===b){ clearHl(); return; }
+  const ov = map.segs.filter(g => a<g[s][1] && b>g[s][0]);
+  if(!ov.length){ clearHl(); return; }
+  const last=ov[ov.length-1];
+  hl = {[s]:{light:[ov[0][s][0], last[s][1]]}, [o]:{light:[ov[0][o][0], last[o][1]]}};
+  renderBoth();
+  const picked = el.value.slice(a,b).trim();
+  if(ov.length>1 || !picked || picked.length>120){ $("hint").innerHTML='<span class="sub">対応する文を表示中（短い範囲を選ぶと単語単位で分かります）</span>'; return; }
+  const seg=ov[0];
+  $("hint").innerHTML='<span class="sub">対応する文を表示中…</span>';
+  selTimer=setTimeout(async () => {
+    const sl=lang[s].value, tl=o==="R" ? lang.R.value : (lang.L.value==="auto" ? (detectedLang||"en") : lang.L.value);
+    const key=sl+"|"+tl+"|"+picked; let t=selCache.get(key);
+    try{ if(t===undefined){ t=(await viaGoogle(picked, sl, tl)).text.trim(); selCache.set(key,t); } }
+    catch(e){ return; }
+    if(tok!==selTok) return;
+    const segO=box[o].value.slice(seg[o][0], seg[o][1]);
+    const needle=t.replace(/[。．.!?！？、，,]+$/,"").toLowerCase();
+    const idx = needle ? segO.toLowerCase().indexOf(needle) : -1;
+    if(idx>=0){
+      hl[o].strong=[seg[o][0]+idx, seg[o][0]+idx+needle.length];
+      hl[s].strong=[a,b];
+      renderBoth();
+    }
+    $("hint").innerHTML=`「${esc(picked)}」 → <b>「${esc(t)}」</b>` + (idx>=0 ? "" : ' <span class="sub">（文中の正確な位置は特定できないため、対応する文全体を表示しています）</span>');
+  }, 250);
+}
+["L","R"].forEach(s => ["select","mouseup","keyup","touchend","selectionchange"].forEach(ev =>
+  box[s].addEventListener(ev, () => requestAnimationFrame(() => selRun(s)))));
+apply();
 </script>
 </body>
 </html>

@@ -217,7 +217,7 @@ async function pool(items, n, fn){
   await Promise.all(Array.from({length:Math.min(n,items.length)}, async()=>{ while(i<items.length){ const k=i++; res[k]=await fn(items[k],k); } }));
   return res;
 }
-async function viaGoogle(q, sl, tl){
+async function _gtx(q, sl, tl){
   const r = await fetch("https://translate.googleapis.com/translate_a/single", {
     method:"POST", signal:(AbortSignal.timeout?AbortSignal.timeout(20000):undefined), headers:{"Content-Type":"application/x-www-form-urlencoded"},
     body:"client=gtx&dt=t&sl="+encodeURIComponent(sl)+"&tl="+encodeURIComponent(tl)+"&q="+encodeURIComponent(q)
@@ -225,6 +225,13 @@ async function viaGoogle(q, sl, tl){
   if(!r.ok) throw new Error("HTTP "+r.status);
   const j = await r.json();
   return {text:j[0].map(x=>x[0]).join(""), detected:j[2]};
+}
+// Google側に制限されたとき（429等）は数分間アクセスを控え、別の手段に切り替える
+let gBlock=0, gFail=0;
+async function viaGoogle(q, sl, tl){
+  if(Date.now()<gBlock) throw new Error("google-cooldown");
+  try{ const r=await _gtx(q, sl, tl); gFail=0; return r; }
+  catch(e){ if(++gFail>=2) gBlock=Date.now()+3*60*1000; throw e; }
 }
 async function viaMyMemory(q, sl, tl){
   const src = sl==="auto" ? "Autodetect" : sl;
@@ -248,19 +255,41 @@ async function getAlts(q, sl, tl){
     (j[5]||[]).forEach(x => (x[2]||[]).forEach(y => alts.push(y[0])));
     (j[1]||[]).forEach(x => (x[1]||[]).forEach(y => alts.push(y)));
     res = {text:j[0].map(x=>x[0]).join(""), alts};
-  }catch(e){ res = {...(await viaMyMemory(q, sl, tl)), alts:[]}; }
+  }catch(e){ const f = await fallbackOne(q, sl, tl); if(f.failed) throw e; res = {...f, alts:[]}; }
   selCache.set(key,res); return res;
 }
 // 1個だけ翻訳（Google→だめならMyMemory。MyMemoryの辞書形式の変な結果は捨てる）
-async function one(p, sl, tl){
-  try{ return await viaGoogle(p, sl, tl); }
-  catch(e){
-    try{
-      const r = await viaMyMemory(p.slice(0,450), sl, tl);
-      if(/\[[ぁ-んァ-ヶー]+\]\s*\//.test(r.text) || /^\s*\/.*\/\s*$/.test(r.text)) return {text:p, detected:null, failed:true};
-      return r;
-    }catch(e2){ return {text:p, detected:null, failed:true}; }
+// Chrome内蔵のオフライン翻訳（Chrome 138以降。Google側の制限と無関係に使える）
+const BI_MAP = {"zh-CN":"zh", "zh-TW":"zh-Hant", "tl":"fil"}, biCache = new Map();
+let usedBuiltin = false;
+async function biDetect(text){
+  if(!("LanguageDetector" in self)) throw new Error("no-detector");
+  const d = await LanguageDetector.create(), r = await d.detect(text);
+  if(!r.length || r[0].detectedLanguage==="und") throw new Error("detect-failed");
+  return r[0].detectedLanguage;
+}
+async function biTranslate(q, sl, tl){
+  if(!("Translator" in self)) throw new Error("no-translator");
+  if(sl==="auto") sl = await biDetect(q);
+  const m = c => BI_MAP[c] || c, a = m(sl), b = m(tl);
+  if(a===b) return {text:q, detected:sl};
+  const key = a+">"+b;
+  if(!biCache.has(key)){
+    const av = await Translator.availability({sourceLanguage:a, targetLanguage:b});
+    if(av==="unavailable") throw new Error("pair-unavailable");
+    biCache.set(key, Translator.create({sourceLanguage:a, targetLanguage:b}));
   }
+  let t; try{ t = await biCache.get(key); }catch(e){ biCache.delete(key); throw e; }
+  return {text: await t.translate(q), detected:sl};
+}
+// Googleが使えないとき: 内蔵翻訳 → MyMemory（辞書形式の変な結果は捨てる）→ 原文のまま
+async function fallbackOne(q, sl, tl, slr){
+  try{ const r = await biTranslate(q, slr || sl, tl); usedBuiltin = true; return r; }catch(e){}
+  try{
+    const r = await viaMyMemory(q.slice(0,450), sl, tl);
+    if(/\[[ぁ-んァ-ヶー]+\]\s*\//.test(r.text) || /^\s*\/.*\/\s*$/.test(r.text)) return {text:q, detected:null, failed:true};
+    return r;
+  }catch(e){ return {text:q, detected:null, failed:true}; }
 }
 const hw = t => t.replace(/（/g,"(").replace(/）/g,")").replace(/［/g,"[").replace(/］/g,"]").replace(/｛/g,"{").replace(/｝/g,"}").replace(/：/g,":");
 const dec = t => t.replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,"&");
@@ -343,13 +372,18 @@ async function translate(text, sl, tl, sd){
     cur.push(c); len+=c.length+1;
   }
   if(cur.length) batches.push(cur);
+  let slr; usedBuiltin = false;
   const tryBatch = async group => {
     let r=null;
-    for(let n=0;n<2 && !r;n++){
+    for(let n=0;n<2 && !r && Date.now()>=gBlock;n++){
       try{ r=await viaGoogle(group.join("\n"), sl, tl); }
-      catch(e){ if(group.length===1){ res.set(group[0], await one(group[0], sl, tl)); return; } await new Promise(f => setTimeout(f, 300)); }
+      catch(e){ if(Date.now()>=gBlock) await new Promise(f => setTimeout(f, 300)); }
     }
-    if(!r) throw new Error("translate-failed");
+    if(!r){   // Googleが使えない → 内蔵翻訳 → MyMemory
+      if(slr===undefined) slr = sl==="auto" ? await biDetect(text).catch(() => sl) : sl;
+      for(const c of group) res.set(c, await fallbackOne(c, sl, tl, slr));
+      return;
+    }
     const ls=r.text.replace(/\n+$/,"").split("\n");
     if(ls.length===group.length) group.forEach((c,k) => res.set(c, {text:ls[k], detected:r.detected}));
     else if(group.length>1){ const h=group.length>>1; await tryBatch(group.slice(0,h)); await tryBatch(group.slice(h)); return; }   // 行数が合わなければ半分ずつ
@@ -358,7 +392,7 @@ async function translate(text, sl, tl, sd){
   await pool(batches, 5, async g => { await tryBatch(g); done+=g.length; setStatus("翻訳中… "+done+"/"+need.length); });
   need.forEach(c => { const r=res.get(c); if(r && !r.failed) transCache.set(sl+"|"+tl+"|"+c, r); });
 
-  let tgt="", segs=[], detected=null, failed=0;
+  let tgt="", segs=[], detected=null, failed=0, ok=0;
   parts.forEach((p, k) => {
     if(!p.core.trim()){ tgt += p.lead+p.trail; return; }
     let t;
@@ -366,7 +400,7 @@ async function translate(text, sl, tl, sd){
     if(p.skip) t=p.core;
     else if(!r || r.failed){ t=p.core.trim(); failed++; }
     else{
-      detected = detected || r.detected; t=dec(r.text.trim());
+      ok++; detected = detected || r.detected; t=dec(r.text.trim());
       if(sd){ t=t.replace(/[。．.]+$/,""); if(tl==="en") t=t.toLowerCase(); }
     }
     let lead=p.lead, trail=p.trail;
@@ -379,7 +413,8 @@ async function translate(text, sl, tl, sd){
     }
     else tgt += k===parts.length-1 ? trail : (/\n/.test(trail) ? trail : (cjk ? "" : " "));
   });
-  return {text:tgt, detected, segs, failed};
+  if(failed && !ok) throw new Error("all-failed");
+  return {text:tgt, detected, segs, failed, builtin:usedBuiltin};
 }
 
 let seq = 0, timer;
@@ -398,8 +433,8 @@ async function run(from){           // from: "L"→右へ / "R"→左へ
     hl = {L:null, R:null}; $("hint").innerHTML=""; renderBoth();
     if(from==="L" && sl==="auto" && r.detected) detectedLang = r.detected;
     const n = r.detected && sl==="auto" ? (LANGS.find(l=>l[0]===r.detected)||[,r.detected])[1] : "";
-    setStatus(r.failed ? "完了（"+r.failed+"個は翻訳できず原文のままです。時間をおいて再度翻訳してください）" : (n ? "検出した言語: "+n : "完了"));
-  }catch(e){ if(my===seq) setStatus("翻訳できませんでした（ネット接続か、Google側の一時的な制限かもしれません。少し待ってから再度お試しください）", true); }
+    setStatus(r.failed ? "完了（"+r.failed+"個は翻訳できず原文のままです。時間をおいて再度翻訳してください）" : (r.builtin ? "完了（Google翻訳が制限中のため、ブラウザ内蔵翻訳を使いました）" : (n ? "検出した言語: "+n : "完了")));
+  }catch(e){ if(my===seq) setStatus("翻訳できませんでした。Google翻訳が一時的に制限されている可能性があります（数十分〜数時間で戻ります）。しばらく待ってから再度お試しください", true); }
 }
 function schedule(){ if(!S.auto) return; clearTimeout(timer); timer=setTimeout(()=>run("L"), 700); }
 

@@ -306,6 +306,15 @@ function sdDict(){
   PRESETS.forEach(g => g.items.forEach(([label,text]) => _dict.set(k(label), text)));
   return _dict;
 }
+// 英語→日本語の辞書（SD用語・定番タグ → 日本語名）
+let _rev=null;
+function sdDictRev(){
+  if(_rev) return _rev;
+  _rev=new Map(); const k=t => t.toLowerCase().replace(/_/g," ").replace(/\s+/g," ").trim();
+  PRESETS.forEach(g => g.items.forEach(([label,text]) => { if(!_rev.has(k(text))) _rev.set(k(text), label); }));
+  GLOSS.forEach(([ja,en]) => en.forEach(e => { if(!_rev.has(k(e))) _rev.set(k(e), ja); }));
+  return _rev;
+}
 const transCache = new Map();
 async function translate(text, sl, tl, sd){
   const pieces = (sd ? sdSegmentize : segmentize)(text);
@@ -316,10 +325,12 @@ async function translate(text, sl, tl, sd){
     const m=p.match(/^(\s*)([\s\S]*?)(\s*)$/); return {a, lead:m[1], core:m[2], trail:m[3], skip:false};
   });
   // 同じタグは1回だけ・辞書とキャッシュにあれば通信しない
-  const dict = (sd && tl==="en") ? sdDict() : null, res = new Map(), need = [];
+  const dict = !sd ? null : tl==="en" ? sdDict() : tl==="ja" ? sdDictRev() : null, res = new Map(), need = [];
+  const dkey = c => tl==="ja" ? c.toLowerCase().replace(/_/g," ").replace(/\s+/g," ").trim() : c.replace(/[\s　]+/g,"");
   parts.forEach(p => {
     const core=p.core.trim(); if(!core || p.skip || res.has(core)) return;
-    const hit = dict && dict.get(core.replace(/[\s　]+/g,""));
+    if(sd && tl==="en" && /^[ -~]+$/.test(core)){ res.set(core, {text:core, detected:null}); return; }   // すでに英語ならそのまま
+    const hit = dict && dict.get(dkey(core));
     if(hit){ res.set(core, {text:hit, detected:null}); return; }
     const c = transCache.get(sl+"|"+tl+"|"+core);
     if(c){ res.set(core, c); return; }
@@ -328,7 +339,7 @@ async function translate(text, sl, tl, sd){
   // 通信回数を減らすため、複数タグを改行区切りで1リクエストにまとめる
   const batches=[]; let cur=[], len=0, done=0;
   for(const c of need){
-    if(cur.length && (len+c.length+1>1800 || cur.length>=40)){ batches.push(cur); cur=[]; len=0; }
+    if(cur.length && (len+c.length+1>3500 || cur.length>=100)){ batches.push(cur); cur=[]; len=0; }
     cur.push(c); len+=c.length+1;
   }
   if(cur.length) batches.push(cur);
@@ -336,7 +347,7 @@ async function translate(text, sl, tl, sd){
     let r=null;
     for(let n=0;n<2 && !r;n++){
       try{ r=await viaGoogle(group.join("\n"), sl, tl); }
-      catch(e){ if(group.length===1){ res.set(group[0], await one(group[0], sl, tl)); return; } await new Promise(f => setTimeout(f, 800)); }
+      catch(e){ if(group.length===1){ res.set(group[0], await one(group[0], sl, tl)); return; } await new Promise(f => setTimeout(f, 300)); }
     }
     if(!r) throw new Error("translate-failed");
     const ls=r.text.replace(/\n+$/,"").split("\n");
@@ -344,7 +355,7 @@ async function translate(text, sl, tl, sd){
     else if(group.length>1){ const h=group.length>>1; await tryBatch(group.slice(0,h)); await tryBatch(group.slice(h)); return; }   // 行数が合わなければ半分ずつ
     else res.set(group[0], await one(group[0], sl, tl));
   };
-  await pool(batches, 3, async g => { await tryBatch(g); done+=g.length; setStatus("翻訳中… "+done+"/"+need.length); });
+  await pool(batches, 5, async g => { await tryBatch(g); done+=g.length; setStatus("翻訳中… "+done+"/"+need.length); });
   need.forEach(c => { const r=res.get(c); if(r && !r.failed) transCache.set(sl+"|"+tl+"|"+c, r); });
 
   let tgt="", segs=[], detected=null, failed=0;

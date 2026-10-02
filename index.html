@@ -251,16 +251,34 @@ async function getAlts(q, sl, tl){
   }catch(e){ res = {...(await viaMyMemory(q, sl, tl)), alts:[]}; }
   selCache.set(key,res); return res;
 }
+// 1個だけ翻訳（Google→だめならMyMemory。MyMemoryの辞書形式の変な結果は捨てる）
 async function one(p, sl, tl){
   try{ return await viaGoogle(p, sl, tl); }
-  catch(e){ return await viaMyMemory(p.slice(0,450), sl, tl); }
+  catch(e){
+    try{
+      const r = await viaMyMemory(p.slice(0,450), sl, tl);
+      if(/\[[ぁ-んァ-ヶー]+\]\s*\//.test(r.text) || /^\s*\/.*\/\s*$/.test(r.text)) return {text:p, detected:null, failed:true};
+      return r;
+    }catch(e2){ return {text:p, detected:null, failed:true}; }
+  }
 }
 const hw = t => t.replace(/（/g,"(").replace(/）/g,")").replace(/［/g,"[").replace(/］/g,"]").replace(/｛/g,"{").replace(/｝/g,"}").replace(/：/g,":");
-// SDモード: カンマ・改行ごとに分割
+const dec = t => t.replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,"&");
+// SDモード: カンマ・改行・<lora:…> ごとに分割
 function sdSegmentize(text){
   const out=[]; let st=0;
   for(let i=0;i<text.length;i++){
-    const c=text[i]; if(!",、，\n".includes(c)) continue;
+    const c=text[i];
+    if(c==="<"){
+      const e=text.indexOf(">", i);
+      if(e>0 && /^<\s*\w+:/.test(text.slice(i,i+14))){
+        if(i>st) out.push([st,i]);
+        let k=e+1; if(",、，".includes(text[k]||"")) k++;
+        while(k<text.length && /[ \t　]/.test(text[k])) k++;
+        out.push([i,k]); st=k; i=k-1; continue;
+      }
+    }
+    if(!",、，\n".includes(c)) continue;
     let e=i+1; while(e<text.length && /[ \t　]/.test(text[e])) e++;
     if(c==="\n") while(e<text.length && /\s/.test(text[e])) e++;
     out.push([st,e]); st=e; i=e-1;
@@ -279,6 +297,16 @@ function splitSD(piece){
   const t=rest.trim();
   return {lead, core:rest, trail:cl2+wt+cl1+sep, skip: !t || /^<.*>$/.test(t) || /^BREAK$/i.test(t) || /^[\d.\s]+$/.test(t)};
 }
+// 辞書（SD用語・定番タグ名）に完全一致したら、翻訳せずその英語タグを使う
+let _dict=null;
+function sdDict(){
+  if(_dict) return _dict;
+  _dict=new Map(); const k=t => t.replace(/[\s　]+/g,"");
+  GLOSS.forEach(([ja,en]) => _dict.set(k(ja), en[0]));
+  PRESETS.forEach(g => g.items.forEach(([label,text]) => _dict.set(k(label), text)));
+  return _dict;
+}
+const transCache = new Map();
 async function translate(text, sl, tl, sd){
   const pieces = (sd ? sdSegmentize : segmentize)(text);
   const cjk = /^(ja|zh|th)/.test(tl);
@@ -287,43 +315,60 @@ async function translate(text, sl, tl, sd){
     if(sd) return {a, ...splitSD(p)};
     const m=p.match(/^(\s*)([\s\S]*?)(\s*)$/); return {a, lead:m[1], core:m[2], trail:m[3], skip:false};
   });
-  // 通信回数を減らすため、複数タグを改行区切りで1リクエストにまとめて翻訳
-  const todo=parts.map((p,i) => (p.core.trim() && !p.skip) ? i : -1).filter(i => i>=0);
-  const rs=new Array(parts.length).fill(null), batches=[]; let cur=[], len=0, done=0;
-  for(const i of todo){
-    const l=parts[i].core.trim().length+1;
-    if(cur.length && (len+l>1800 || cur.length>=40)){ batches.push(cur); cur=[]; len=0; }
-    cur.push(i); len+=l;
+  // 同じタグは1回だけ・辞書とキャッシュにあれば通信しない
+  const dict = (sd && tl==="en") ? sdDict() : null, res = new Map(), need = [];
+  parts.forEach(p => {
+    const core=p.core.trim(); if(!core || p.skip || res.has(core)) return;
+    const hit = dict && dict.get(core.replace(/[\s　]+/g,""));
+    if(hit){ res.set(core, {text:hit, detected:null}); return; }
+    const c = transCache.get(sl+"|"+tl+"|"+core);
+    if(c){ res.set(core, c); return; }
+    res.set(core, null); need.push(core.replace(/\s*\n\s*/g," "));
+  });
+  // 通信回数を減らすため、複数タグを改行区切りで1リクエストにまとめる
+  const batches=[]; let cur=[], len=0, done=0;
+  for(const c of need){
+    if(cur.length && (len+c.length+1>1800 || cur.length>=40)){ batches.push(cur); cur=[]; len=0; }
+    cur.push(c); len+=c.length+1;
   }
   if(cur.length) batches.push(cur);
-  await pool(batches, 3, async idxs => {
-    const lines=idxs.map(i => parts[i].core.trim().replace(/\s*\n\s*/g," "));
-    let out=null;
-    try{
-      const r=await viaGoogle(lines.join("\n"), sl, tl), ls=r.text.replace(/\n+$/,"").split("\n");
-      if(ls.length===idxs.length) out=ls.map(t => ({text:t, detected:r.detected}));
-    }catch(e){}
-    if(!out) out=await pool(idxs, 3, i => one(parts[i].core.trim(), sl, tl));   // まとめ翻訳が崩れたら1個ずつ
-    idxs.forEach((i,k) => { rs[i]=out[k]; });
-    done+=idxs.length; setStatus("翻訳中… "+done+"/"+todo.length);
-  });
-  let tgt="", segs=[], detected=null;
+  const tryBatch = async group => {
+    let r=null;
+    for(let n=0;n<2 && !r;n++){
+      try{ r=await viaGoogle(group.join("\n"), sl, tl); }
+      catch(e){ if(group.length===1){ res.set(group[0], await one(group[0], sl, tl)); return; } await new Promise(f => setTimeout(f, 800)); }
+    }
+    if(!r) throw new Error("translate-failed");
+    const ls=r.text.replace(/\n+$/,"").split("\n");
+    if(ls.length===group.length) group.forEach((c,k) => res.set(c, {text:ls[k], detected:r.detected}));
+    else if(group.length>1){ const h=group.length>>1; await tryBatch(group.slice(0,h)); await tryBatch(group.slice(h)); return; }   // 行数が合わなければ半分ずつ
+    else res.set(group[0], await one(group[0], sl, tl));
+  };
+  await pool(batches, 3, async g => { await tryBatch(g); done+=g.length; setStatus("翻訳中… "+done+"/"+need.length); });
+  need.forEach(c => { const r=res.get(c); if(r && !r.failed) transCache.set(sl+"|"+tl+"|"+c, r); });
+
+  let tgt="", segs=[], detected=null, failed=0;
   parts.forEach((p, k) => {
     if(!p.core.trim()){ tgt += p.lead+p.trail; return; }
     let t;
+    const r=res.get(p.core.trim());
     if(p.skip) t=p.core;
+    else if(!r || r.failed){ t=p.core.trim(); failed++; }
     else{
-      t=rs[k].text.trim(); detected = detected || rs[k].detected;
+      detected = detected || r.detected; t=dec(r.text.trim());
       if(sd){ t=t.replace(/[。．.]+$/,""); if(tl==="en") t=t.toLowerCase(); }
     }
     let lead=p.lead, trail=p.trail;
     if(sd && !cjk){ lead=hw(lead); trail=hw(trail).replace(/[、，]\s*/g,", "); }
     tgt+=lead; const c=tgt.length; tgt+=t;
     segs.push({src:[p.a+p.lead.length, p.a+p.lead.length+p.core.length], tgt:[c, tgt.length]});
-    if(sd) tgt+=trail;
+    if(sd){
+      tgt+=trail;
+      if(k<parts.length-1 && !/[,、，\n]/.test(trail)) tgt=tgt.replace(/[ \t　]+$/,"")+", ";   // カンマ無しで続くタグ（例: 文字<lora:…>）にカンマを補う
+    }
     else tgt += k===parts.length-1 ? trail : (/\n/.test(trail) ? trail : (cjk ? "" : " "));
   });
-  return {text:tgt, detected, segs};
+  return {text:tgt, detected, segs, failed};
 }
 
 let seq = 0, timer;
@@ -342,8 +387,8 @@ async function run(from){           // from: "L"→右へ / "R"→左へ
     hl = {L:null, R:null}; $("hint").innerHTML=""; renderBoth();
     if(from==="L" && sl==="auto" && r.detected) detectedLang = r.detected;
     const n = r.detected && sl==="auto" ? (LANGS.find(l=>l[0]===r.detected)||[,r.detected])[1] : "";
-    setStatus(n ? "検出した言語: "+n : "完了");
-  }catch(e){ if(my===seq) setStatus("翻訳できませんでした（ネット接続を確認してください）", true); }
+    setStatus(r.failed ? "完了（"+r.failed+"個は翻訳できず原文のままです。時間をおいて再度翻訳してください）" : (n ? "検出した言語: "+n : "完了"));
+  }catch(e){ if(my===seq) setStatus("翻訳できませんでした（ネット接続か、Google側の一時的な制限かもしれません。少し待ってから再度お試しください）", true); }
 }
 function schedule(){ if(!S.auto) return; clearTimeout(timer); timer=setTimeout(()=>run("L"), 700); }
 
@@ -528,7 +573,7 @@ const GLOSS=[
  ["制服",["school uniform"]],["着物",["kimono"]],["桜",["cherry blossoms"]],["夕焼け",["sunset"]],["夜",["night"]],
  ["逆光",["backlighting"]],["映画的な照明",["cinematic lighting"]],["写真のようにリアル",["photorealistic"]],["アニメ風",["anime style"]],
  ["水彩",["watercolor"]],["油絵",["oil painting"]],["カメラ目線",["looking at viewer"]],["俯瞰",["from above"]],["あおり",["from below"]],
- ["横顔",["profile","from side"]],["背景",["background"]],["白背景",["white background"]],["単色背景",["simple background"]]
+ ["横顔",["profile","from side"]],["複雑なディテール",["intricate details"]],["体積光",["volumetric lighting"]],["環境光遮蔽",["ambient occlusion"]],["表面下散乱",["subsurface scattering"]],["鮮明なピント",["sharp focus"]],["ピント",["focus"]],["最大品質",["best quality"]],["非常に詳細",["very detailed"]],["現実的な被写界深度",["depth of field"]],["被写界深度",["depth of field"]],["背景",["background"]],["白背景",["white background"]],["単色背景",["simple background"]]
 ];
 function glossCands(phrase){
   if(lang.R.value!=="en") return [];

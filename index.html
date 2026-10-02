@@ -219,7 +219,7 @@ async function pool(items, n, fn){
 }
 async function viaGoogle(q, sl, tl){
   const r = await fetch("https://translate.googleapis.com/translate_a/single", {
-    method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    method:"POST", signal:(AbortSignal.timeout?AbortSignal.timeout(20000):undefined), headers:{"Content-Type":"application/x-www-form-urlencoded"},
     body:"client=gtx&dt=t&sl="+encodeURIComponent(sl)+"&tl="+encodeURIComponent(tl)+"&q="+encodeURIComponent(q)
   });
   if(!r.ok) throw new Error("HTTP "+r.status);
@@ -240,7 +240,7 @@ async function getAlts(q, sl, tl){
   let res;
   try{
     const r = await fetch("https://translate.googleapis.com/translate_a/single", {
-      method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
+      method:"POST", signal:(AbortSignal.timeout?AbortSignal.timeout(20000):undefined), headers:{"Content-Type":"application/x-www-form-urlencoded"},
       body:"client=gtx&dt=t&dt=at&dt=bd&sl="+encodeURIComponent(sl)+"&tl="+encodeURIComponent(tl)+"&q="+encodeURIComponent(q)
     });
     if(!r.ok) throw new Error("HTTP "+r.status);
@@ -287,7 +287,26 @@ async function translate(text, sl, tl, sd){
     if(sd) return {a, ...splitSD(p)};
     const m=p.match(/^(\s*)([\s\S]*?)(\s*)$/); return {a, lead:m[1], core:m[2], trail:m[3], skip:false};
   });
-  const rs = await pool(parts, 4, p => (p.core.trim() && !p.skip) ? one(p.core.trim(), sl, tl) : null);
+  // 通信回数を減らすため、複数タグを改行区切りで1リクエストにまとめて翻訳
+  const todo=parts.map((p,i) => (p.core.trim() && !p.skip) ? i : -1).filter(i => i>=0);
+  const rs=new Array(parts.length).fill(null), batches=[]; let cur=[], len=0, done=0;
+  for(const i of todo){
+    const l=parts[i].core.trim().length+1;
+    if(cur.length && (len+l>1800 || cur.length>=40)){ batches.push(cur); cur=[]; len=0; }
+    cur.push(i); len+=l;
+  }
+  if(cur.length) batches.push(cur);
+  await pool(batches, 3, async idxs => {
+    const lines=idxs.map(i => parts[i].core.trim().replace(/\s*\n\s*/g," "));
+    let out=null;
+    try{
+      const r=await viaGoogle(lines.join("\n"), sl, tl), ls=r.text.replace(/\n+$/,"").split("\n");
+      if(ls.length===idxs.length) out=ls.map(t => ({text:t, detected:r.detected}));
+    }catch(e){}
+    if(!out) out=await pool(idxs, 3, i => one(parts[i].core.trim(), sl, tl));   // まとめ翻訳が崩れたら1個ずつ
+    idxs.forEach((i,k) => { rs[i]=out[k]; });
+    done+=idxs.length; setStatus("翻訳中… "+done+"/"+todo.length);
+  });
   let tgt="", segs=[], detected=null;
   parts.forEach((p, k) => {
     if(!p.core.trim()){ tgt += p.lead+p.trail; return; }

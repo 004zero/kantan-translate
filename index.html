@@ -53,7 +53,7 @@
   <div class="bar">
     <button class="primary" id="go">翻訳する (Ctrl+Enter)</button>
     <button id="swap" title="言語と内容を入れ替え">⇄ 入れ替え</button>
-    <label class="chk"><input type="checkbox" id="auto"> 入力しながら自動翻訳</label>
+    <label class="chk"><input type="checkbox" id="auto"> 自動で反映（左右どちらを編集しても）</label>
     <label class="chk" title="(重み:1.2) [ ] <lora:…> BREAK を壊さず、カンマごとのタグ単位で翻訳します"><input type="checkbox" id="sd"> SDプロンプトモード</label>
     <span id="status"></span>
   </div>
@@ -138,8 +138,9 @@ function fill(sel, withAuto){
 fill(lang.L, true); fill(lang.R, false);
 
 // 設定の保存・復元
-const S = {fsL:18, fsR:18, hL:260, hR:260, sl:"auto", tl:"ja", auto:false, sd:true};
+const S = {fsL:18, fsR:18, hL:260, hR:260, sl:"auto", tl:"ja", auto:true, sd:true, v:2};
 try{ Object.assign(S, JSON.parse(localStorage.getItem("trans-settings")||"{}")); }catch(e){}
+if(S.v!==2){ S.v=2; S.auto=true; }
 const save = () => { try{ localStorage.setItem("trans-settings", JSON.stringify(S)); }catch(e){} };
 function apply(){
   for(const s of ["L","R"]){ box[s].style.fontSize = S["fs"+s]+"px"; box[s].style.height = S["h"+s]+"px"; }
@@ -170,7 +171,7 @@ function renderBd(s){
   bd[s].innerHTML=html+"\u200b"; sync(s);
 }
 function renderBoth(){ renderBd("L"); renderBd("R"); }
-function invalidate(){ map=null; hl={L:null,R:null}; $("hint").innerHTML=""; $("cands").innerHTML=""; renderBoth(); }
+function invalidate(){ map=null; lastText=null; hl={L:null,R:null}; $("hint").innerHTML=""; $("cands").innerHTML=""; renderBoth(); }
 ["L","R"].forEach(s => {
   new ResizeObserver(() => sync(s)).observe(box[s]);
   box[s].addEventListener("scroll", () => { bd[s].scrollTop=box[s].scrollTop; });
@@ -193,7 +194,7 @@ function count(s){
   if(v && (v.match(/[\x00-\x7F]/g)||[]).length/v.length>0.7){ const n=tokEst(v); h+=" ・約"+n+"/75トークン"; warn=n>75; }
   cnt[s].textContent=h; cnt[s].style.color=warn?"#dc2626":"";
 }
-["L","R"].forEach(s => box[s].addEventListener("input", () => { count(s); invalidate(); if(s==="L") schedule(); }));
+["L","R"].forEach(s => box[s].addEventListener("input", () => edited(s)));
 box.N.addEventListener("input", () => count("N"));
 
 // ---- 翻訳本体 ----
@@ -346,19 +347,24 @@ function sdDictRev(){
   return _rev;
 }
 const transCache = new Map();
-async function translate(text, sl, tl, sd){
-  const pieces = (sd ? sdSegmentize : segmentize)(text);
-  const cjk = /^(ja|zh|th)/.test(tl);
-  const parts = pieces.map(([a,b]) => {
+function buildParts(text, sd){
+  return (sd ? sdSegmentize : segmentize)(text).map(([a,b]) => {
     const p=text.slice(a,b);
     if(sd) return {a, ...splitSD(p)};
     const m=p.match(/^(\s*)([\s\S]*?)(\s*)$/); return {a, lead:m[1], core:m[2], trail:m[3], skip:false};
   });
+}
+// reuse: 変更のないタグの訳として使う文字列（先頭から数えた「中身のあるタグ」の順番ごと）
+async function translate(text, sl, tl, sd, reuse){
+  const cjk = /^(ja|zh|th)/.test(tl);
+  const parts = buildParts(text, sd);
   // 同じタグは1回だけ・辞書とキャッシュにあれば通信しない
   const dict = !sd ? null : tl==="en" ? sdDict() : tl==="ja" ? sdDictRev() : null, res = new Map(), need = [];
   const dkey = c => tl==="ja" ? c.toLowerCase().replace(/_/g," ").replace(/\s+/g," ").trim() : c.replace(/[\s　]+/g,"");
+  let ai=0;
   parts.forEach(p => {
-    const core=p.core.trim(); if(!core || p.skip || res.has(core)) return;
+    const core=p.core.trim(); if(!core) return; const idx=ai++;
+    if(p.skip || (reuse && reuse[idx]!=null) || res.has(core)) return;
     if(sd && tl==="en" && /^[ -~]+$/.test(core)){ res.set(core, {text:core, detected:null}); return; }   // すでに英語ならそのまま
     const hit = dict && dict.get(dkey(core));
     if(hit){ res.set(core, {text:hit, detected:null}); return; }
@@ -393,12 +399,13 @@ async function translate(text, sl, tl, sd){
   await pool(batches, 5, async g => { await tryBatch(g); done+=g.length; setStatus("翻訳中… "+done+"/"+need.length); });
   need.forEach(c => { const r=res.get(c); if(r && !r.failed) transCache.set(sl+"|"+tl+"|"+c, r); });
 
-  let tgt="", segs=[], detected=null, failed=0, ok=0;
+  let tgt="", segs=[], detected=null, failed=0, ok=0, ai2=0;
   parts.forEach((p, k) => {
     if(!p.core.trim()){ tgt += p.lead+p.trail; return; }
-    let t;
+    const idx=ai2++; let t;
     const r=res.get(p.core.trim());
     if(p.skip) t=p.core;
+    else if(reuse && reuse[idx]!=null){ t=reuse[idx]; ok++; }
     else if(!r || r.failed){ t=p.core.trim(); failed++; }
     else{
       ok++; detected = detected || r.detected; t=dec(r.text.trim());
@@ -418,6 +425,45 @@ async function translate(text, sl, tl, sd){
   return {text:tgt, detected, segs, failed, builtin:usedBuiltin};
 }
 
+// ---- 片側を編集したら、変わったタグだけ翻訳してもう片側へ反映 ----
+let lastText=null, syncSeq=0, autoTimer;
+function lcsMatch(a, b){            // bの各要素に対応するaの番号（なければ-1）
+  const n=a.length, m=b.length, dp=Array.from({length:n+1}, () => new Uint16Array(m+1));
+  for(let i=n-1;i>=0;i--) for(let j=m-1;j>=0;j--) dp[i][j] = a[i]===b[j] ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const out=new Array(m).fill(-1); let i=0, j=0;
+  while(i<n && j<m){ if(a[i]===b[j]){ out[j]=i; i++; j++; } else if(dp[i+1][j]>=dp[i][j+1]) i++; else j++; }
+  return out;
+}
+function dirLangs(from){
+  const to = from==="L" ? "R" : "L";
+  return {to, sl:lang[from].value, tl: to==="R" ? lang.R.value : (lang.L.value==="auto" ? (detectedLang||"en") : lang.L.value)};
+}
+async function syncFrom(s){
+  const text=box[s].value, {to:o, sl, tl}=dirLangs(s);
+  if(!text.trim()){ box[o].value=""; count(o); invalidate(); setStatus(""); return; }
+  if(!map || !lastText || box[o].value!==lastText[o]) return run(s);   // 対応表がなければ全文を翻訳
+  const my=++syncSeq, oBefore=box[o].value;
+  const act=buildParts(text, S.sd).filter(p => p.core.trim());
+  const oldCores=map.segs.map(g => lastText[s].slice(g[s][0], g[s][1]).trim());
+  const counter=map.segs.map(g => lastText[o].slice(g[o][0], g[o][1]));
+  const reuse=lcsMatch(oldCores, act.map(p => p.core.trim())).map(i => i>=0 ? counter[i] : null);
+  setStatus("反映中…");
+  try{
+    const r=await translate(text, sl, tl, S.sd, reuse);
+    if(my!==syncSeq || box[s].value!==text || box[o].value!==oBefore) return;
+    box[o].value=r.text; count(o);
+    map={segs: r.segs.map(g => s==="L" ? {L:g.src, R:g.tgt} : {R:g.src, L:g.tgt})};
+    lastText={L:box.L.value, R:box.R.value};
+    hl={L:null,R:null}; $("hint").innerHTML=""; $("cands").innerHTML=""; renderBoth();
+    setStatus(r.failed ? "反映しました（"+r.failed+"個は翻訳できず原文のまま）" : "もう片側に反映しました");
+  }catch(e){ if(my===syncSeq) setStatus("自動反映できませんでした（Google翻訳が制限中かもしれません。少し待って編集するか、翻訳ボタンを押してください）", true); }
+}
+function autoSched(s){
+  hl={L:null,R:null}; $("hint").innerHTML=""; $("cands").innerHTML=""; renderBoth();
+  clearTimeout(autoTimer); autoTimer=setTimeout(() => syncFrom(s), 800);
+}
+function edited(s){ count(s); if(S.auto) autoSched(s); else invalidate(); }
+
 let seq = 0, timer;
 async function run(from){           // from: "L"→右へ / "R"→左へ
   const to = from==="L" ? "R" : "L";
@@ -432,6 +478,7 @@ async function run(from){           // from: "L"→右へ / "R"→左へ
     box[to].value = r.text; count(to);
     map = {segs: r.segs.map(g => from==="L" ? {L:g.src, R:g.tgt} : {R:g.src, L:g.tgt})};
     hl = {L:null, R:null}; $("hint").innerHTML=""; renderBoth();
+    lastText = {L:box.L.value, R:box.R.value};
     if(from==="L" && sl==="auto" && r.detected) detectedLang = r.detected;
     const n = r.detected && sl==="auto" ? (LANGS.find(l=>l[0]===r.detected)||[,r.detected])[1] : "";
     setStatus(r.failed ? "完了（"+r.failed+"個は翻訳できず原文のままです。時間をおいて再度翻訳してください）" : (r.builtin ? "完了（Google翻訳が制限中のため、ブラウザ内蔵翻訳を使いました）" : (n ? "検出した言語: "+n : "完了")));
@@ -450,6 +497,7 @@ $("swap").onclick = () => {
   lang.L.value = tl; lang.R.value = sl; S.sl=tl; S.tl=sl; save();
   const t = box.L.value; box.L.value = box.R.value; box.R.value = t; count("L"); count("R");
   if(map) map.segs = map.segs.map(g => ({L:g.R, R:g.L}));
+  if(lastText) lastText = {L:lastText.R, R:lastText.L};
   hl = {L:null, R:null}; $("hint").innerHTML=""; renderBoth();
 };
 
@@ -464,10 +512,10 @@ document.addEventListener("click", async e => {
   if(s==="N"){ negAct(a); return; }
   if(a==="copy"){ await copyText(el.value); setStatus("コピーしました"); }
   else if(a==="paste"){
-    try{ const t = await navigator.clipboard.readText(); el.value = t; count(s); invalidate(); if(s==="L") schedule(); setStatus("貼り付けました"); }
+    try{ const t = await navigator.clipboard.readText(); el.value = t; edited(s); setStatus("貼り付けました"); }
     catch(err){ el.focus(); setStatus("ブラウザが許可しない場合は Ctrl+V（Macは⌘+V）で貼り付けてください", true); }
   }
-  else if(a==="clear"){ el.value=""; count(s); invalidate(); el.focus(); }
+  else if(a==="clear"){ el.value=""; edited(s); el.focus(); }
   else if(a==="rev"){ run("R"); }
   else if(a==="w+"||a==="w-"){ adjustWeight(s, a==="w+" ? 0.1 : -0.1); }
   else if(a==="fs+"||a==="fs-"){ S["fs"+s]=Math.min(60,Math.max(10,S["fs"+s]+(a==="fs+"?2:-2))); el.style.fontSize=S["fs"+s]+"px"; sync(s); save(); }
@@ -538,7 +586,7 @@ function adjustWeight(s, d){
   inner=inner.trim(); w=Math.max(0.1, Math.round((w+d)*100)/100);
   const out = Math.abs(w-1)<0.001 ? inner : "("+inner+":"+w+")";
   el.setRangeText(out, from, to, "select"); el.focus();
-  count(s); if(s!=="N") invalidate();
+  count(s); if(s!=="N") edited(s);
 }
 ["L","R","N"].forEach(s => box[s].addEventListener("keydown", e => {
   if((e.ctrlKey||e.metaKey) && (e.key==="ArrowUp"||e.key==="ArrowDown")){ e.preventDefault(); adjustWeight(s, e.key==="ArrowUp" ? 0.1 : -0.1); }
@@ -587,7 +635,7 @@ function insertTags(s, text){
   const head = before + (before ? (before.endsWith(",") ? " " : ", ") : "") + text;
   el.value = head + (after ? ", "+after : "");
   el.focus(); el.setSelectionRange(head.length, head.length);
-  count(s); if(s!=="N") invalidate();
+  count(s); if(s!=="N") edited(s);
   setStatus((s==="L"?"左":s==="R"?"右":"ネガティブ")+"の枠に追加しました");
 }
 const chipEls=[];
@@ -658,7 +706,7 @@ function pickCand(text){
   box.R.setRangeText(text, x, y, "preserve");
   map.segs.forEach(g => { if(g===candSeg) g.R[1]+=d; else if(g.R[0]>=y){ g.R[0]+=d; g.R[1]+=d; } });
   hl.R.light[1]+=d; hl.R.strong=[x, x+text.length];
-  count("R"); renderBoth(); setStatus("「"+text+"」に置き換えました");
+  count("R"); if(lastText) lastText.R=box.R.value; renderBoth(); setStatus("「"+text+"」に置き換えました");
 }
 apply();
 </script>

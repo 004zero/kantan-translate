@@ -105,10 +105,11 @@
       <button data-act="paste" data-s="N">📋 貼り付け</button>
       <button data-act="copy" data-s="N">コピー</button>
       <button data-act="clear" data-s="N">消去</button>
-      <button data-act="ntr" data-s="N">→ 右の言語へ翻訳</button>
+      <button data-act="ntr" data-s="N" title="日本語なら英語へ、英語なら日本語へ翻訳します">⇄ 日本語↔英語に翻訳</button>
       <button data-act="nundo" data-s="N">元に戻す</button>
       <span class="lbl">重み</span>
       <button data-act="w-" data-s="N">−0.1</button><button data-act="w+" data-s="N">+0.1</button>
+      <span id="negMsg" style="font-size:13px"></span>
       <span class="sp"></span><span class="cnt" id="cntN">0文字</span>
     </div>
   </section>
@@ -545,18 +546,24 @@ function adjustWeight(s, d){
 
 // ---- ネガティブ欄 ----
 let negBackup=null;
+function negSay(t, err){ const m=$("negMsg"); m.textContent=t||""; m.style.color = err ? "#dc2626" : "var(--sub)"; }
 async function negAct(a){
-  const el=box.N;
-  if(a==="copy"){ await copyText(el.value); setStatus("コピーしました"); }
-  else if(a==="paste"){ try{ el.value=await navigator.clipboard.readText(); count("N"); setStatus("貼り付けました"); }catch(e){ el.focus(); setStatus("Ctrl+V（Macは⌘+V）で貼り付けてください", true); } }
+  const el=box.N; negSay("");
+  if(a==="copy"){ await copyText(el.value); negSay("コピーしました"); }
+  else if(a==="paste"){ try{ el.value=await navigator.clipboard.readText(); count("N"); negSay("貼り付けました"); }catch(e){ el.focus(); negSay("Ctrl+V（Macは⌘+V）で貼り付けてください", true); } }
   else if(a==="clear"){ el.value=""; count("N"); el.focus(); }
   else if(a==="w+"||a==="w-"){ adjustWeight("N", a==="w+" ? 0.1 : -0.1); }
-  else if(a==="nundo"){ if(negBackup!==null){ el.value=negBackup; negBackup=null; count("N"); } }
+  else if(a==="nundo"){ if(negBackup!==null){ el.value=negBackup; negBackup=null; count("N"); negSay("元に戻しました"); } }
   else if(a==="ntr"){
-    if(!el.value.trim()) return;
-    negBackup=el.value; setStatus("翻訳中…");
-    try{ const r=await translate(el.value, "auto", lang.R.value, true); el.value=r.text; count("N"); setStatus("ネガティブを翻訳しました（「元に戻す」で戻せます）"); }
-    catch(e){ setStatus("翻訳できませんでした（ネット接続を確認してください）", true); }
+    const v=el.value;
+    if(!v.trim()){ negSay("先にネガティブプロンプトを入力してください", true); return; }
+    const toEn = (v.match(/[ -~]/g)||[]).length / v.length < 0.7;   // 日本語っぽければ英語へ、英語なら日本語へ
+    negBackup=v; negSay("翻訳中…");
+    try{
+      const r=await translate(v, "auto", toEn ? "en" : "ja", true);
+      el.value=r.text; count("N");
+      negSay((toEn ? "英語に" : "日本語に")+"翻訳しました"+(r.failed ? "（"+r.failed+"個は翻訳できず原文のまま）" : "")+"。「元に戻す」で戻せます", !!r.failed);
+    }catch(e){ negSay("翻訳できませんでした（Google翻訳が一時的に制限中かもしれません。しばらく待ってお試しください）", true); }
   }
 }
 
@@ -619,7 +626,7 @@ const GLOSS=[
  ["制服",["school uniform"]],["着物",["kimono"]],["桜",["cherry blossoms"]],["夕焼け",["sunset"]],["夜",["night"]],
  ["逆光",["backlighting"]],["映画的な照明",["cinematic lighting"]],["写真のようにリアル",["photorealistic"]],["アニメ風",["anime style"]],
  ["水彩",["watercolor"]],["油絵",["oil painting"]],["カメラ目線",["looking at viewer"]],["俯瞰",["from above"]],["あおり",["from below"]],
- ["横顔",["profile","from side"]],["複雑なディテール",["intricate details"]],["体積光",["volumetric lighting"]],["環境光遮蔽",["ambient occlusion"]],["表面下散乱",["subsurface scattering"]],["鮮明なピント",["sharp focus"]],["ピント",["focus"]],["最大品質",["best quality"]],["非常に詳細",["very detailed"]],["現実的な被写界深度",["depth of field"]],["被写界深度",["depth of field"]],["背景",["background"]],["白背景",["white background"]],["単色背景",["simple background"]]
+ ["横顔",["profile","from side"]],["複雑なディテール",["intricate details"]],["余分な腕",["extra arms"]],["余分な脚",["extra legs"]],["悪い解剖学",["bad anatomy"]],["悪い比率",["bad proportions"]],["ノイズ",["noise"]],["ぼけ",["blurry"]],["長い首",["long neck"]],["悪い品質",["bad quality"]],["悪い顔",["bad face","ugly face"]],["悪い目",["bad eyes"]],["不自然な指",["fused fingers","bad fingers"]],["指が多い",["too many fingers","extra fingers"]],["検閲",["censor","censored"]],["モザイク",["mosaic censoring","censored"]],["スケッチ",["sketch"]],["グレースケール",["grayscale"]],["彩度が高すぎる",["oversaturated"]],["体積光",["volumetric lighting"]],["環境光遮蔽",["ambient occlusion"]],["表面下散乱",["subsurface scattering"]],["鮮明なピント",["sharp focus"]],["ピント",["focus"]],["最大品質",["best quality"]],["非常に詳細",["very detailed"]],["現実的な被写界深度",["depth of field"]],["被写界深度",["depth of field"]],["背景",["background"]],["白背景",["white background"]],["単色背景",["simple background"]]
 ];
 function glossCands(phrase){
   if(lang.R.value!=="en") return [];
